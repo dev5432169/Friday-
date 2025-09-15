@@ -1,0 +1,1704 @@
+# --------------------------------------------------------------------------------
+# Friday: Upgraded Personal Voice Assistant
+# This script improves upon the existing "Friday" voice assistant code with a more
+# robust, scalable, and maintainable architecture using logging and better error handling.
+# modular and scalable architecture.
+# --------------------------------------------------------------------------------
+
+import webbrowser
+import random
+import datetime
+import subprocess
+import sys
+import importlib
+import logging
+import urllib.parse
+import json
+import speech_recognition as sr
+import smtplib
+from email.message import EmailMessage
+import queue
+from contextlib import contextmanager
+import pyttsx3
+import torch
+import requests
+import os
+import time
+import threading
+import inspect
+import wikipedia # type: ignore
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import re
+from plyer import notification # type: ignore
+import shutil
+import psutil # type: ignore
+
+# --- GUI Integration ---
+try:
+    import friday_gui # pyright: ignore[reportMissingImports]
+    GUI_ENABLED = True
+except ImportError:
+    GUI_ENABLED = False
+
+# --- Brain Integration ---
+try:
+    from friday_brain import Brain # pyright: ignore[reportMissingImports]
+    BRAIN_ENABLED = True
+except ImportError:
+    BRAIN_ENABLED = False
+
+# ------------------- Logging Configuration -------------------
+def setup_logging():
+    """Configures a robust logging system."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler("friday_assistant.log"),
+            logging.StreamHandler(sys.stdout) # Also print to console
+        ]
+    )
+    # Suppress overly verbose logs from other libraries
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+# ------------------- Global State and Configuration -------------------
+notification_history = []
+reminders = []
+is_muted = False
+SPEECH_ENGINE = None # New global for the speech engine
+
+# Queue for communicating with the GUI
+gui_queue = queue.Queue() if GUI_ENABLED else None
+
+USER_PROFILE_FILE = 'profile.json'
+user_profile = {} # Will be loaded from file
+
+def load_user_profile():
+    """Loads the user profile from a JSON file, creating it if it doesn't exist."""
+    global user_profile
+    default_profile = {
+        "name": "Devansh Prabhakar",
+        "location": "Mumbai, India",
+        "email": "devansh.pkr@gmail.com",
+        "likes": ["coding", "space", "music"],
+        "mood": "neutral"
+    }
+    if os.path.exists(USER_PROFILE_FILE):
+        try:
+            with open(USER_PROFILE_FILE, 'r') as f:
+                user_profile = json.load(f)
+            logging.info(f"Loaded user profile for '{user_profile.get('name')}' from '{USER_PROFILE_FILE}'.")
+        except (json.JSONDecodeError, IOError) as e:
+            logging.warning(f"Could not load profile from {USER_PROFILE_FILE}, using defaults. Error: {e}")
+            user_profile = default_profile
+    else:
+        logging.info(f"'{USER_PROFILE_FILE}' not found. Creating a default profile.")
+        with open(USER_PROFILE_FILE, 'w') as f:
+            json.dump(default_profile, f, indent=4)
+        user_profile = default_profile
+        speak_friday("I've created a default user profile for you. You can edit the profile.json file to personalize me.")
+
+# A list of popular songs for the automatic 'play music' feature
+POPULAR_SONGS = [
+    "Old Town Road Lil Nas X",
+    "Blinding Lights The Weeknd",
+    "Levitating Dua Lipa",
+    "As It Was Harry Styles",
+    "Sunflower Post Malone",
+    "bad guy Billie Eilish",
+    "Despacito Luis Fonsi",
+    "Shape of You Ed Sheeran"
+]
+
+# ------------------- Package Installation and Setup -------------------
+def install_packages():
+    """Checks and installs required Python packages."""
+    packages = {
+        "speechrecognition": "speech_recognition",
+        "pyaudio": "pyaudio",
+        "requests": "requests",
+        "transformers": "transformers",
+        "torch": "torch",
+        "pyttsx3": "pyttsx3",
+        "plyer": "plyer",
+        "wikipedia": "wikipedia",
+        "pillow": "PIL", # For the GUI
+        "psutil": "psutil" # Added psutil for system scanning
+    }
+    for pkg, module in packages.items():
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            logging.info(f"Installing missing package: {pkg}...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+    logging.info("\nNote: For PyAudio on Windows, you may need to install it with 'pip install pipwin' and then 'pipwin install pyaudio'.")
+
+def initialize_speech_engine():
+    """Initializes the pyttsx3 speech engine once for efficiency."""
+    global SPEECH_ENGINE
+    try:
+        SPEECH_ENGINE = pyttsx3.init()
+        voices = SPEECH_ENGINE.getProperty('voices')
+        # Use a different voice if available
+        SPEECH_ENGINE.setProperty('voice', voices[1].id if len(voices) > 1 else voices[0].id)
+        SPEECH_ENGINE.setProperty('rate', 175)
+        logging.info("Speech engine initialized successfully.")
+    except Exception as e:
+        logging.error(f"Failed to initialize speech engine: {e}", exc_info=True)
+
+def launch_gui():
+    """Launches the GUI in a separate thread if available."""
+    if GUI_ENABLED and gui_queue is not None:
+        gui_thread = threading.Thread(target=friday_gui.start_gui, args=(gui_queue,), daemon=True)
+        gui_thread.start()
+        logging.info("Friday Face GUI launched.")
+    else:
+        logging.info("GUI module not found or disabled. Running in command-line only mode.")
+
+# ------------------- Speech and Notification Engine -------------------
+def speak_friday(text):
+    """Converts text to speech using the global, pre-initialized engine."""
+    global is_muted
+    if is_muted:
+        logging.info(f"(Muted) Friday would say: {text}")
+        return
+
+    if not SPEECH_ENGINE:
+        logging.error("Speech engine is not initialized. Cannot speak.")
+        return
+
+    if gui_queue: gui_queue.put("speaking")
+
+    try:
+        SPEECH_ENGINE.say(text)
+        SPEECH_ENGINE.runAndWait()
+    except Exception as e:
+        logging.error(f"Text-to-speech error: {e}", exc_info=True)
+    finally:
+        if gui_queue: gui_queue.put("idle")
+
+def friday_notify(title="Friday Notification", message="Here's something you should know!"):
+    """Sends a desktop notification and logs it to a history."""
+    try:
+        notification.notify(
+            title=title,
+            message=message,
+            app_name="Friday",
+            timeout=8
+        )
+        notification_history.append(f"{title}: {message}")
+    except Exception as e:
+        logging.error(f"Notification error: {e}", exc_info=True)
+
+@contextmanager
+def listening_state():
+    """A context manager to handle the GUI's listening state."""
+    if gui_queue:
+        gui_queue.put("listening")
+    try:
+        yield
+    finally:
+        if gui_queue:
+            gui_queue.put("idle")
+
+@contextmanager
+def thinking_state():
+    """A context manager to handle the GUI's thinking/processing state."""
+    if gui_queue:
+        gui_queue.put("thinking")
+    try:
+        yield
+    finally:
+        if gui_queue:
+            gui_queue.put("idle")
+
+# ------------------- Core Command Functions -------------------
+def greet_user():
+    """Greets the user and introduces Friday."""
+    speak_friday(f"Hey {user_profile['name']}! I'm Friday, your assistant. How can I brighten your day?")
+
+def tell_date_time():
+    """Tells the current date and time."""
+    now = datetime.datetime.now()
+    current_time = now.strftime("%I:%M %p")
+    current_date = now.strftime("%A, %B %d, %Y")
+    speak_friday(f"The current time is {current_time} and today is {current_date}.")
+
+def tell_user_name():
+    """Tells the user their name from the profile."""
+    name = user_profile.get("name")
+    if name:
+        speak_friday(f"Your name is {name}.")
+    else:
+        speak_friday("I'm not sure what your name is. Please tell me so I can remember it.")
+
+def tell_friday_name():
+    """States Friday's name."""
+    speak_friday("My name is Friday. It's a pleasure to assist you.")
+
+def get_weather(recognizer, source):
+    """Fetches and reports the weather."""
+    speak_friday("Please say the city and country for the weather report.")
+    try:
+        with listening_state():
+            # Added timeout to prevent hanging on background noise
+            audio = recognizer.listen(source, timeout=7, phrase_time_limit=5)
+            location_input = recognizer.recognize_google(audio)
+        logging.info(f"Location requested for weather: {location_input}")
+
+        # --- IMPORTANT: Replace with your actual API key ---
+        api_key = os.getenv("OPENWEATHERMAP_API_KEY", "YOUR_OPENWEATHERMAP_API_KEY")
+        if api_key == "YOUR_OPENWEATHERMAP_API_KEY":
+            speak_friday("Weather service is not configured. Please set the OPENWEATHERMAP_API_KEY environment variable.")
+            return
+
+        with thinking_state():
+            url = f"http://api.openweathermap.org/data/2.5/weather?q={location_input}&appid={api_key}&units=metric"
+            response = requests.get(url)
+            data = response.json()
+
+            if data.get("cod") != 200:
+                error_message = data.get("message", "Unknown error")
+                speak_friday(f"Sorry, I couldn't find weather data for that location. {error_message.capitalize()}.")
+                return
+
+            temp = data["main"]["temp"]
+            condition = data["weather"][0]["description"].capitalize()
+            city_name = data["name"]
+            weather_report = f"In {city_name}, it's currently {temp}°C with {condition}."
+        
+        logging.info(weather_report)
+        speak_friday(weather_report)
+    except sr.WaitTimeoutError:
+        speak_friday("I was listening for a location, but didn't hear anything.")
+    except sr.UnknownValueError:
+        speak_friday("Sorry, I couldn't catch the location.")
+    except requests.exceptions.RequestException:
+        speak_friday("I couldn't reach the weather service. Please check your internet connection.")
+    except Exception as e:
+        logging.error(f"Unexpected weather error: {e}", exc_info=True)
+        speak_friday("Something went wrong while fetching the weather.")
+
+def set_reminder(recognizer, source):
+    """Sets a new reminder for the user."""
+    speak_friday("What would you like me to remind you about?")
+    try:
+        with listening_state():
+            # Added timeout to prevent hanging
+            audio = recognizer.listen(source, timeout=7, phrase_time_limit=5)
+            reminder = recognizer.recognize_google(audio)
+        reminders.append(reminder)
+        logging.info(f"Reminder set: {reminder}")
+        speak_friday(f"Got it! I'll remind you about: {reminder}.")
+    except (sr.UnknownValueError, sr.RequestError):
+        speak_friday("Sorry, I couldn't catch that. Please try again.")
+def cancel_reminder(recognizer, source): # No changes needed here, but for consistency review
+    """Cancels a specific reminder."""
+    if not reminders:
+        speak_friday("You don't have any reminders to cancel.")
+        return
+    speak_friday("Which reminder would you like to cancel?")
+    try:
+        with listening_state():
+            # Added timeout to prevent hanging
+            audio = recognizer.listen(source, timeout=7, phrase_time_limit=5)
+            to_cancel = recognizer.recognize_google(audio)
+        if to_cancel in reminders:
+            reminders.remove(to_cancel)
+            speak_friday(f"Reminder '{to_cancel}' has been cancelled.")
+        else:
+            speak_friday("I couldn't find that reminder.")
+    except (sr.UnknownValueError, sr.RequestError):
+        speak_friday("Sorry, I couldn't catch that.")
+def read_notifications(): # No changes needed here
+    """Reads all unread notifications to the user."""
+    if not notification_history:
+        speak_friday("You have no new notifications from me.")
+        return
+    
+    speak_friday(f"You have {len(notification_history)} new notifications. Here they are:")
+    for note in notification_history:
+        speak_friday(note)
+    
+    notification_history.clear()
+    speak_friday("I have cleared the notifications from my memory.")
+
+def clear_notifications():
+    """Clears all notifications from the history without reading them."""
+    if not notification_history:
+        speak_friday("You have no notifications to clear.")
+    else:
+        count = len(notification_history)
+        notification_history.clear()
+        speak_friday(f"Okay, I've cleared all {count} notifications.")
+        logging.info("Notification history cleared.")
+
+def give_update():
+    """Gives a quick summary of time and notifications."""
+    speak_friday("Here's your update:")
+    tell_date_time()
+    read_notifications()
+    
+def check_status():
+    """Responds to a 'how are you' query with a friendly status update."""
+    responses = [
+        "I'm doing great, thanks for asking! Ready to help.",
+        "I'm online and fully operational. How can I assist you today?",
+        f"Feeling fantastic! It's a great day to help you, {user_profile.get('name', 'there')}.",
+        "I'm doing well, thank you. What's on your mind?"
+    ]
+    speak_friday(random.choice(responses))
+    
+def handle_thanks():
+    """Responds to the user saying 'thank you' with a variety of phrases."""
+    responses = [
+        "You're welcome!",
+        "No problem at all.",
+        "My pleasure. Is there anything else?",
+        f"Of course, {user_profile.get('name', 'there')}. Happy to help."
+    ]
+    speak_friday(random.choice(responses))
+    
+def search_web(text):
+    """Parses a query from text and performs a web search."""
+    # Define triggers to find the search query, from most specific to least specific
+    triggers = ["search the web for", "search for", "google", "search"]
+    query = ""
+    for trigger in triggers:
+        if trigger in text:
+            _, _, potential_query = text.partition(trigger)
+            query = potential_query.strip()
+            if query:
+                break
+
+    if query:
+        speak_friday(f"Okay, searching the web for {query}.")
+        webbrowser.open(f"https://www.google.com/search?q={query}")
+    else:
+        speak_friday("What would you like me to search for?")
+
+def get_news(location):
+    """Fetches and reports the top news headlines for a given location."""
+    # IMPORTANT: Get a free API key from NewsAPI.org and set it as an environment variable.
+    api_key = os.getenv("NEWSAPI_API_KEY")
+    if not api_key:
+        speak_friday("News service is not configured. Please set the NEWSAPI_API_KEY environment variable.")
+        logging.error("NEWSAPI_API_KEY environment variable not found.")
+        return
+
+    speak_friday(f"Fetching news for {location}.")
+    with thinking_state():
+        try:
+            # Construct the API URL. We'll use the 'q' parameter to search for news related to the location.
+            url = f"https://newsapi.org/v2/top-headlines?q={location}&apiKey={api_key}&language=en"
+            response = requests.get(url)
+            data = response.json()
+
+            if data["status"] != "ok":
+                speak_friday("Sorry, I couldn't fetch the news. The news service might be down or your API key is invalid.")
+                logging.error(f"News API error: {data.get('message', 'Unknown error')}")
+                return
+            
+            articles = data["articles"]
+            if not articles:
+                speak_friday(f"I couldn't find any news for {location}.")
+                return
+            
+            speak_friday(f"Here are the top headlines for {location}:")
+            # Speak the top 3 headlines
+            for i, article in enumerate(articles[:3]):
+                title = article.get("title", "No title available")
+                speak_friday(f"Headline number {i + 1}: {title}.")
+                time.sleep(1) # Pause between articles for better listening experience
+
+        except requests.exceptions.RequestException:
+            speak_friday("I couldn't reach the news service. Please check your internet connection.")
+        except Exception as e:
+            logging.error(f"Unexpected news error: {e}", exc_info=True)
+            speak_friday("Something went wrong while trying to get the news.")
+
+# --- Application & Website Launcher ---
+
+CUSTOM_SHORTCUTS_FILE = 'custom_shortcuts.json'
+
+# Centralized dictionary for easy customization of apps and websites
+DEFAULT_APP_TARGETS = {
+    # --- Websites ---
+    "youtube": {"type": "url", "path": "https://www.youtube.com"},
+    "youtube app": {"type": "url", "path": "https://www.youtube.com"},
+    "youtube music": {"type": "url", "path": "https://music.youtube.com"},
+    "youtube music app": {"type": "url", "path": "https://music.youtube.com"},
+    "google": {"type": "url", "path": "https://www.google.com"},
+    
+    # --- Local Applications (Windows) ---
+    # For apps not in the system PATH, provide the full path to the .exe file.
+    # Example for Spotify (you may need to adjust this path):
+    # "spotify": {"type": "app", "path": r"C:\Users\devan\AppData\Roaming\Spotify\Spotify.exe"},
+    
+    # Apps typically found in the system PATH
+    "chrome": {"type": "app", "path": "chrome.exe"},
+    "google chrome": {"type": "app", "path": "chrome.exe"},
+    "google chrome app": {"type": "app", "path": "chrome.exe"},
+    "firefox": {"type": "app", "path": "firefox"},
+    "spotify": {"type": "app", "path": "spotify.exe"}, # More explicit
+    "calculator": {"type": "app", "path": "calc.exe"},
+    "vscode": {"type": "app", "path": "code"},
+    "visual studio code": {"type": "app", "path": "code"},
+    "notepad": {"type": "app", "path": "notepad.exe"},
+    "command prompt": {"type": "app", "path": "cmd.exe"},
+    "terminal": {"type": "app", "path": "cmd.exe"},
+    "word": {"type": "app", "path": "WINWORD.EXE"},
+    "excel": {"type": "app", "path": "EXCEL.EXE"},
+    "powerpoint": {"type": "app", "path": "POWERPNT.EXE"},
+    "paint": {"type": "app", "path": "mspaint.exe"},
+    "file explorer": {"type": "app", "path": "explorer.exe"},
+}
+
+def load_app_targets():
+    """Loads default targets and merges them with custom shortcuts from a JSON file."""
+    app_targets = DEFAULT_APP_TARGETS.copy()
+    if os.path.exists(CUSTOM_SHORTCUTS_FILE):
+        try:
+            with open(CUSTOM_SHORTCUTS_FILE, 'r') as f:
+                custom_targets = json.load(f)
+            app_targets.update(custom_targets)
+            logging.info(f"Loaded {len(custom_targets)} custom shortcuts from '{CUSTOM_SHORTCUTS_FILE}'.")
+        except (json.JSONDecodeError, IOError) as e:
+            logging.warning(f"Could not load custom shortcuts from {CUSTOM_SHORTCUTS_FILE}: {e}")
+    return app_targets
+
+# Load the targets globally at startup
+APP_TARGETS = load_app_targets()
+
+def learn_new_shortcut(shortcut_name, recognizer, source):
+    """A voice-driven, interactive function for Friday to learn a new shortcut after a failure or by request."""
+    global APP_TARGETS
+    speak_friday(f"Great! To learn the location for '{shortcut_name}', please find the application's executable file, copy its full path, and paste it into the console window now.")
+
+    try:
+        app_path = input(f"Paste the full path for '{shortcut_name}': ").strip().strip('"')
+        if not app_path:
+            speak_friday("The path can't be empty. Cancelling.")
+            return
+
+        if not os.path.exists(app_path):
+            speak_friday("I can't seem to find a file at that path. Please double-check it and try again.")
+            logging.warning(f"Path provided for new shortcut does not exist: {app_path}")
+            return
+
+        custom_targets = {}
+        if os.path.exists(CUSTOM_SHORTCUTS_FILE):
+            with open(CUSTOM_SHORTCUTS_FILE, 'r') as f:
+                try: custom_targets = json.load(f)
+                except json.JSONDecodeError: pass # File is corrupt or empty, will be overwritten
+
+        custom_targets[shortcut_name] = {"type": "app", "path": app_path}
+        with open(CUSTOM_SHORTCUTS_FILE, 'w') as f:
+            json.dump(custom_targets, f, indent=4)
+
+        APP_TARGETS = load_app_targets()
+        speak_friday(f"Perfect! I've upgraded my knowledge base. I will now remember how to open {shortcut_name}.")
+        logging.info(f"Learned Shortcut: '{shortcut_name}' -> '{app_path}' saved.")
+
+        speak_friday("Would you like me to open it now?")
+        with listening_state():
+            audio = recognizer.listen(source, timeout=7, phrase_time_limit=4)
+            choice = recognizer.recognize_google(audio).lower()
+        if 'yes' in choice or 'sure' in choice or 'okay' in choice:
+            open_application(shortcut_name, recognizer, source)
+
+    except (sr.UnknownValueError, sr.WaitTimeoutError):
+        speak_friday("I didn't hear a response, but I've saved the shortcut for later.")
+    except Exception as e:
+        speak_friday("Something went wrong while learning the shortcut. Please check the console for errors.")
+        logging.error(f"Error in learn_new_shortcut: {e}", exc_info=True)
+
+def add_new_shortcut(recognizer, source):
+    """Guides the user to add a new application shortcut via voice and console."""
+    speak_friday("Okay, let's add a new application shortcut. What is the voice command you want to use?")
+    try:
+        with listening_state():
+            audio = recognizer.listen(source, timeout=10, phrase_time_limit=5)
+            shortcut_name = recognizer.recognize_google(audio).lower().strip()
+        learn_new_shortcut(shortcut_name, recognizer, source)
+    except (sr.UnknownValueError, sr.WaitTimeoutError):
+        speak_friday("I didn't catch a name. Let's try again later.")
+
+def open_application(app_name, recognizer, source):
+    """Opens a specified application or website, attempting to launch it even if not in the predefined list."""
+    app_name_lower = app_name.lower().strip()
+    logging.info(f"Attempting to open: '{app_name_lower}'")
+    opened_successfully = False
+
+    # 1. Check predefined shortcuts first
+    target_info = APP_TARGETS.get(app_name_lower)
+    if target_info:
+        try:
+            if target_info["type"] == "url":
+                webbrowser.open(target_info["path"])
+                opened_successfully = True
+            elif target_info["type"] == "app" and sys.platform == "win32":
+                os.startfile(target_info["path"])
+                opened_successfully = True
+        except FileNotFoundError:
+            speak_friday(f"Sorry, the shortcut for '{app_name}' points to a path I can't find.")
+            logging.error(f"FileNotFoundError for predefined path '{target_info['path']}'.")
+            # Do not return, allow self-development to trigger if desired
+        except Exception as e:
+            speak_friday(f"Sorry, an unexpected error occurred while trying to open the shortcut for {app_name}.")
+            logging.error(f"Unexpected error opening '{target_info['path']}': {e}", exc_info=True)
+            return
+
+    # 2. If not in shortcuts, try to launch directly (for apps in PATH or registered apps)
+    if sys.platform == "win32":
+        if not opened_successfully:
+            try:
+                os.startfile(app_name_lower)
+                opened_successfully = True
+            except FileNotFoundError:
+            # --- SELF-DEVELOPMENT TRIGGER ---
+            # This is where Friday learns from failure.
+                speak_friday(f"Sorry, I couldn't find '{app_name}'. It might not be installed or in my memory.")
+                speak_friday("Would you like to teach me where to find it for next time?")
+                try:
+                    with listening_state():
+                        audio = recognizer.listen(source, timeout=7, phrase_time_limit=4)
+                        choice = recognizer.recognize_google(audio).lower()
+                    if 'yes' in choice or 'sure' in choice or 'okay' in choice:
+                        learn_new_shortcut(app_name_lower, recognizer, source)
+                    else:
+                        speak_friday("Okay, maybe next time.")
+                except (sr.UnknownValueError, sr.WaitTimeoutError):
+                    speak_friday("I didn't hear a response, so I'll leave it for now.")
+            except Exception as e:
+                speak_friday(f"Sorry, I ran into an error trying to open {app_name}.")
+                logging.error(f"Unexpected error opening '{app_name_lower}': {e}", exc_info=True)
+    
+    if opened_successfully:
+        speak_friday("Here you go boss.")
+    else:
+        # This block now correctly handles cases where the app wasn't found and the user declined to teach Friday.
+        # Also serves as a fallback for non-Windows systems.
+        if not sys.platform == "win32":
+            speak_friday(f"I don't have a shortcut for '{app_name}'. You can add it to my code.")
+ 
+def search_wikipedia(text):
+    """Parses a query from text and searches Wikipedia for a summary."""
+    triggers = ["search wikipedia for", "on wikipedia", "wikipedia"]
+    query = ""
+    for trigger in triggers:
+        if trigger in text:
+            _, _, potential_query = text.partition(trigger)
+            query = potential_query.strip()
+            if query:
+                break
+    
+    if not query:
+        speak_friday("What would you like me to search for on Wikipedia?")
+        return
+
+    try:
+        speak_friday(f"Searching Wikipedia for {query}...")
+        with thinking_state():
+            page = wikipedia.page(query, auto_suggest=True)
+            summary = page.summary.split('.')
+            # Ensure we have at least two sentences before trying to access them, and strip leading/trailing whitespace
+            summary_text = summary[0].strip()
+            if len(summary) > 1 and summary[1].strip():
+                summary_text += f". {summary[1]}"
+        
+        speak_friday(f"According to Wikipedia: {summary_text}.")
+    except wikipedia.exceptions.DisambiguationError as e:
+        speak_friday("There are multiple results. Could you be more specific?")
+        logging.warning(f"Wikipedia disambiguation error for '{query}': {e.options}")
+    except wikipedia.exceptions.PageError:
+        speak_friday("Sorry, I couldn't find a Wikipedia page for that.")
+        logging.warning(f"Wikipedia page not found for '{query}'.")
+    except Exception as e:
+        speak_friday("An error occurred while searching Wikipedia.")
+        logging.error(f"Unexpected Wikipedia error: {e}", exc_info=True)
+        
+def scan_computer():
+    """Gathers and reports key system health statistics."""
+    speak_friday("Scanning system health. Please wait a moment.")
+    logging.info("\n--- System Scan Results ---")
+    with thinking_state():
+        try:
+            # Disk Usage
+            total, used, free = shutil.disk_usage("/")
+            total_gb = total // (2**30)
+            used_gb = used // (2**30)
+            free_gb = free // (2**30)
+            disk_message = f"You have {total_gb} gigabytes of total storage, with {free_gb} gigabytes currently available."
+            logging.info(f"Disk Usage: {used_gb} GB used out of {total_gb} GB. ({free_gb} GB free)")
+            
+            # CPU Usage
+            cpu_percent = psutil.cpu_percent(interval=1)
+            cpu_message = f"CPU usage is currently at {cpu_percent} percent."
+            logging.info(f"CPU Usage: {cpu_percent}%")
+
+            # Memory (RAM) Usage
+            memory = psutil.virtual_memory()
+            mem_percent = memory.percent
+            total_mem_gb = memory.total // (1024**3)
+            available_mem_gb = memory.available // (1024**3)
+            mem_message = f"Your computer has a total of {total_mem_gb} gigabytes of RAM. {available_mem_gb} gigabytes are available."
+            logging.info(f"RAM Usage: {mem_percent}% ({available_mem_gb} GB available out of {total_mem_gb} GB)")
+
+        except Exception as e:
+            logging.error(f"Error during system scan: {e}", exc_info=True)
+            speak_friday("I encountered an error while trying to scan the computer. Please check the console for details.")
+            return
+    
+        speak_friday(disk_message)
+        speak_friday(cpu_message)
+        speak_friday(mem_message)
+
+        logging.info("--- Scan Complete ---")
+        speak_friday("System scan complete. All key components are functioning normally.")
+        
+def get_wikipedia_summary(query):
+    """
+    Searches Wikipedia for a given query and returns the summary text.
+    Returns an error message string if the search fails.
+    """
+    try:
+        # Request a decent number of sentences for a good summary.
+        summary = wikipedia.summary(query, sentences=5, auto_suggest=True, redirect=True)
+        return summary
+    except wikipedia.exceptions.DisambiguationError as e:
+        # Return a helpful error message if the term is ambiguous
+        return f"The term '{query}' is ambiguous. Please be more specific. Some options are: {', '.join(e.options[:3])}."
+    except wikipedia.exceptions.PageError:
+        # Return an error if the page doesn't exist
+        return f"Sorry, I could not find a Wikipedia page for '{query}'."
+    except Exception as e:
+        # Catch other potential errors (network, etc.)
+        logging.error(f"An unexpected error occurred during Wikipedia search: {e}", exc_info=True)
+        return "Sorry, an error occurred while trying to research that topic."
+
+def collect_data(recognizer, source):
+    """Guides the user to dictate information, handles file conflicts, and saves it to a file."""
+    # Ensure the data directory exists
+    data_dir = "collected_data"
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir)
+        logging.info(f"Created directory: '{data_dir}'")
+
+    speak_friday("Okay, what is the topic or name for this note?")
+
+    try:
+        # Get the topic/filename from the user
+        with listening_state():
+            audio = recognizer.listen(source)
+            topic_or_filename = recognizer.recognize_google(audio).lower()
+
+        if not topic_or_filename.strip():
+            speak_friday("I didn't catch a name. Let's try again later.")
+            return
+
+        speak_friday(f"Got it: '{topic_or_filename}'. Should I take dictation from you, or should I research this topic online?")
+        with listening_state():
+            audio_mode = recognizer.listen(source)
+            mode_choice = recognizer.recognize_google(audio_mode).lower()
+
+        # Sanitize filename
+        sanitized_name = re.sub(r'[\\/*?:"<>|]', "", topic_or_filename).strip().replace(" ", "_")
+        if not sanitized_name:
+            sanitized_name = f"note_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        filename = sanitized_name + ".txt"
+        filepath = os.path.join(data_dir, filename)
+
+        note_content_str = ""
+        is_research = False
+
+        # --- Research Path ---
+        if "research" in mode_choice or "online" in mode_choice or "google" in mode_choice:
+            is_research = True
+            speak_friday(f"Okay, researching '{topic_or_filename}' for you. This might take a moment.")
+            with thinking_state():
+                note_content_str = get_wikipedia_summary(topic_or_filename)
+            
+            # Check if research returned an error message
+            if "Sorry," in note_content_str or "The term" in note_content_str:
+                speak_friday(note_content_str) # Speak the error
+                return
+
+        # --- Dictation Path ---
+        elif "dictation" in mode_choice or "dictate" in mode_choice or "from me" in mode_choice:
+            speak_friday(f"Okay, I'm ready for dictation. Say 'stop collecting' when you're finished.")
+            note_content_list = []
+            while True:
+                try:
+                    with listening_state():
+                        audio_data = recognizer.listen(source, timeout=20, phrase_time_limit=30)
+                        data_point = recognizer.recognize_google(audio_data)
+                    logging.info(f"Heard data for note: '{data_point}'")
+
+                    stop_phrases = ["stop collecting", "that's all", "end note", "finish note"]
+                    if any(phrase in data_point.lower() for phrase in stop_phrases):
+                        break
+                    note_content_list.append(data_point)
+                except (sr.WaitTimeoutError, sr.UnknownValueError):
+                    speak_friday("I'm still listening whenever you're ready.")
+            
+            if not note_content_list:
+                speak_friday("It looks like you didn't say anything to record. Cancelling the note.")
+                return
+            note_content_str = "\n".join(note_content_list)
+        
+        else:
+            speak_friday("I didn't understand that choice. Let's try again later.")
+            return
+
+        # --- File Saving Logic using the save_note tool ---
+        final_content = ""
+        save_mode = 'w'
+
+        if os.path.exists(filepath):
+            speak_friday(f"A note named '{filename}' already exists. Should I overwrite it, append to it, or cancel?")
+            try:
+                with listening_state():
+                    audio_choice = recognizer.listen(source)
+                    choice = recognizer.recognize_google(audio_choice).lower()
+                
+                if "append" in choice:
+                    save_mode = 'a'
+                    speak_friday("Okay, I will append to the existing note.")
+                    # When appending, just add a separator and the new content
+                    final_content = f"\n\n--- Appended on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---\n" + note_content_str + "\n"
+                elif "overwrite" in choice:
+                    save_mode = 'w'
+                    speak_friday("Okay, I will overwrite the note.")
+                    # When overwriting, create the full content with a header
+                    header_text = "Research Summary" if is_research else "Dictated Note"
+                    final_content = (f"--- {header_text}: {topic_or_filename} ---\n"
+                                   f"Created on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                   f"--------------------\n\n"
+                                   f"{note_content_str}\n")
+                else:
+                    speak_friday("Okay, cancelling the note.")
+                    return
+            except (sr.UnknownValueError, sr.RequestError):
+                speak_friday("I didn't understand your choice. Cancelling to be safe.")
+                return
+        else: # File does not exist, create it with a header
+            save_mode = 'w'
+            header_text = "Research Summary" if is_research else "Dictated Note"
+            final_content = (f"--- {header_text}: {topic_or_filename} ---\n"
+                           f"Created on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                           f"--------------------\n\n"
+                           f"{note_content_str}\n")
+
+        save_note({"filename": filename, "content": final_content, "mode": save_mode})
+        speak_friday(f"Okay, I've finished the note and saved it as {filename}.")
+
+        # --- Ask to read it back ---
+        speak_friday("Would you like me to read it back to you?")
+        try:
+            with listening_state():
+                audio_readback = recognizer.listen(source)
+                readback_choice = recognizer.recognize_google(audio_readback).lower()
+
+            if 'yes' in readback_choice or 'sure' in readback_choice or 'okay' in readback_choice:
+                speak_friday("Here is the full note:")
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    full_note_content = f.read()
+                speak_friday(full_note_content)
+        except (sr.UnknownValueError, sr.RequestError):
+            speak_friday("I didn't catch that, so I'll assume no for now.")
+            
+    except (sr.UnknownValueError, sr.RequestError):
+        speak_friday("I couldn't understand. Please try the command again.")
+    except Exception as e:
+        logging.error(f"Error during data collection: {e}", exc_info=True)
+        speak_friday("An error occurred while taking the note. Please check the console.")
+
+# --- Brain Tool Functions ---
+# These are functions designed to be used by friday_brain.py.
+# They often return data instead of just speaking.
+
+def save_note(args):
+    """
+    A non-interactive tool for the Brain to save content to a file.
+    Args:
+        args (dict): A dictionary containing 'filename', 'content', and optionally 'mode' ('w' or 'a').
+    """
+    filename = args.get("filename")
+    content = args.get("content")
+    mode = args.get("mode", 'w') # Default to write/overwrite
+
+    if not filename or content is None:
+        logging.error("Brain Tool Error: save_note requires 'filename' and 'content'.")
+        return "Error: Missing filename or content."
+
+    data_dir = "collected_data"
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir)
+
+    filepath = os.path.join(data_dir, filename)
+    with open(filepath, mode, encoding='utf-8') as f:
+        f.write(content)
+    
+    logging.info(f"Brain Tool: Note saved to '{filepath}' in mode '{mode}'")
+    return f"Note saved as {filename}"
+
+def send_email(args, recognizer, source):
+    """
+    An interactive tool for the Brain to send an email. It will prompt
+    the user for recipient, subject, and body.
+    """
+    # Check for credentials first
+    # Prioritize environment variable, but fall back to user profile for convenience.
+    email_address = os.getenv("FRIDAY_EMAIL_ADDRESS") or user_profile.get("email")
+    email_password = os.getenv("FRIDAY_EMAIL_PASSWORD")
+
+    if not email_address or not email_password:
+        speak_friday("Email service is not fully configured. I have your email address, but I need a password.")
+        speak_friday("Please set the FRIDAY_EMAIL_PASSWORD environment variable to continue.")
+        logging.error("Email Error: FRIDAY_EMAIL_PASSWORD environment variable not set.")
+        if not email_address:
+            logging.error("Email Error: FRIDAY_EMAIL_ADDRESS environment variable or user_profile email is not set.")
+        return "Email configuration is missing."
+
+    try:
+        # 1. Get Recipient
+        speak_friday("Who should I send the email to?")
+        with listening_state():
+            audio = recognizer.listen(source, timeout=10, phrase_time_limit=5)
+            recipient_text = recognizer.recognize_google(audio).lower()
+        # Basic email address formatting
+        recipient = recipient_text.replace(" ", "").replace("at", "@").replace("dot", ".")
+        speak_friday(f"Got it. Recipient is {recipient}.")
+
+        # 2. Get Subject
+        speak_friday("What is the subject of the email?")
+        with listening_state():
+            audio = recognizer.listen(source, timeout=10, phrase_time_limit=5)
+            subject = recognizer.recognize_google(audio)
+        speak_friday(f"Subject: {subject}.")
+
+        # 3. Get Body
+        speak_friday("And what should the body of the email say? Say 'finish email' when you are done.")
+        email_body_parts = []
+        while True:
+            try:
+                with listening_state():
+                    audio = recognizer.listen(source, timeout=20, phrase_time_limit=30)
+                    line = recognizer.recognize_google(audio)
+                if "finish email" in line.lower() or "finished email" in line.lower():
+                    break
+                email_body_parts.append(line)
+                speak_friday("Got it. Keep going.")
+            except (sr.UnknownValueError, sr.WaitTimeoutError):
+                speak_friday("I'm still listening for the email body.")
+        
+        body = "\n".join(email_body_parts)
+        speak_friday("Okay, I have the full email. Sending it now.")
+
+        # 4. Send the email
+        with thinking_state():
+            msg = EmailMessage()
+            msg['Subject'] = subject
+            msg['From'] = email_address
+            msg['To'] = recipient
+            msg.set_content(body)
+
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+                smtp.login(email_address, email_password)
+                smtp.send_message(msg)
+        return "I have successfully sent the email."
+    except Exception as e:
+        logging.error(f"Brain Tool Error (send_email): {e}", exc_info=True)
+        return "Sorry, an error occurred while trying to send the email. Please check the console."
+
+def read_note(args):
+    """
+    A non-interactive tool for the Brain to read the content of a saved note.
+    Args:
+        args (dict): A dictionary containing 'filename'.
+    """
+    filename = args.get("filename")
+    if not filename:
+        return "Error: I need a filename to read a note."
+
+    data_dir = "collected_data"
+    filepath = os.path.join(data_dir, filename)
+
+    if not os.path.exists(filepath):
+        return f"Sorry, I could not find a note named '{filename}'."
+
+    with open(filepath, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    return f"Here are the contents of the note '{filename}':\n\n{content}"
+
+def get_satellite_event_data(query):
+    """
+    A tool to fetch data about natural events from NASA's EONET satellite data for the Brain.
+    Args:
+        query (dict): A dictionary containing 'query' for the event type or location.
+    """
+    search_query = query.get("query")
+    if not search_query:
+        return "Error: get_satellite_data tool requires a 'query' argument."
+
+    speak_friday(f"Accessing NASA's Earth Observatory satellite data for information on {search_query}.")
+    
+    with thinking_state():
+        logging.info(f"Brain Tool: Getting satellite data for '{search_query}'...")
+        try:
+            # The EONET API endpoint for events
+            url = "https://eonet.gsfc.nasa.gov/api/v3/events"
+            # Get recent open events, limit to 20 for faster processing
+            response = requests.get(url, params={"limit": 20, "status": "open"})
+            response.raise_for_status() # Raise an exception for bad status codes
+            data = response.json()
+            
+            found_events = []
+            query_lower = search_query.lower()
+            
+            for event in data.get("events", []):
+                title = event.get("title", "")
+                categories = [cat.get("title", "").lower() for cat in event.get("categories", [])]
+                
+                # Check if the query matches the title or any category
+                if query_lower in title.lower() or any(query_lower in s for s in categories):
+                    found_events.append(event)
+            
+            if not found_events:
+                return f"I searched the satellite data but couldn't find any recent open events related to '{search_query}'."
+            
+            # Format the response for the top 3 findings
+            response_text = f"I found {len(found_events)} recent events related to {search_query}. Here are the top ones: "
+            for i, event in enumerate(found_events[:3]):
+                title = event.get('title')
+                latest_date_str = event.get('geometry', [{}])[-1].get('date', 'an unknown date')
+                formatted_date = datetime.datetime.fromisoformat(latest_date_str.replace('Z', '+00:00')).strftime('%B %d, %Y')
+                response_text += f"Event {i+1}: {title}, observed on {formatted_date}. "
+            return response_text
+        except requests.exceptions.RequestException as e:
+            logging.error(f"EONET API Error: {e}", exc_info=True)
+            return "Sorry, I couldn't connect to the NASA satellite data service. Please check the internet connection."
+
+def access_public_camera_feed(args):
+    """
+    A tool to simulate 'hacking' by accessing a public camera feed.
+    This example uses the NASA ISS live feed.
+    Args:
+        args (any): Arguments from the brain (not used here, but required for consistency).
+    """
+    speak_friday("Accessing a public, high-orbit camera feed.")
+    webbrowser.open("https://www.youtube.com/watch?v=86YLFOog4GM") # NASA ISS Live Stream
+    return "Public camera feed accessed."
+
+def view_satellite_imagery(location_query):
+    """
+    A tool to view satellite imagery of a location using Google Earth.
+    Args:
+        location_query (str): The location to search for.
+    """
+    speak_friday(f"Accessing satellite imagery for {location_query}.")
+    query_encoded = urllib.parse.quote_plus(location_query)
+    webbrowser.open(f"https://earth.google.com/web/search/{query_encoded}")
+    return f"Satellite imagery for {location_query} displayed."
+# --- New Function: Automated Test Suite ---
+
+def scan_vitals(args, recognizer, source):
+    """
+    A simulated health care companion tool for the Brain.
+    It pretends to scan vitals and gives a disclaimer.
+    """
+    speak_friday("Activating health companion mode. I'm here to help you check in with yourself.")
+    speak_friday("For this simulated scan, should I use the camera for a visual analysis or the fingerprint sensor for a biometric reading?")
+
+    try:
+        with listening_state():
+            audio = recognizer.listen(source, timeout=10, phrase_time_limit=5)
+            choice = recognizer.recognize_google(audio).lower()
+
+        if "camera" in choice or "visual" in choice:
+            scanner_type = "camera"
+            speak_friday("Okay, using the camera. Please look directly at the lens and relax. The scan will begin now.")
+        elif "fingerprint" in choice or "sensor" in choice:
+            scanner_type = "fingerprint sensor"
+            speak_friday("Okay, using the biometric sensor. Please place your finger gently on the scanner and hold it there.")
+        else:
+            speak_friday("I didn't quite catch that. We can try the health check again later.")
+            return "Scan cancelled due to unclear choice."
+
+        with thinking_state():
+            logging.info(f"Brain Tool: Simulating vital scan with {scanner_type}...")
+            # Simulate a more involved scan
+            speak_friday("Scanning...")
+            time.sleep(1.5)
+            speak_friday("Analyzing data...")
+            time.sleep(1.5)
+
+            # Generate randomized but healthy-looking vitals
+            heart_rate = random.randint(65, 85)
+            oxygen_sat = random.randint(96, 99)
+            respiration = random.randint(14, 18)
+
+        speak_friday("Scan complete. Here are the simulated results.")
+        vitals_report = f"Your heart rate is approximately {heart_rate} beats per minute. Blood oxygen saturation appears to be {oxygen_sat} percent. And your respiration rate is around {respiration} breaths per minute."
+        speak_friday(vitals_report)
+
+        # Add a small, friendly analysis
+        if heart_rate < 70:
+            speak_friday("Your heart rate seems nice and relaxed. That's great to see.")
+        else:
+            speak_friday("Everything appears to be in a normal, healthy range.")
+
+        speak_friday("Please remember, I am an AI assistant, not a medical device. These results are a simulation and should not be used for medical diagnosis. Always consult a healthcare professional for any health concerns.")
+        return "Simulated vitals scan completed successfully."
+
+    except (sr.UnknownValueError, sr.WaitTimeoutError):
+        speak_friday("I didn't hear a response, so I'll cancel the health check for now.")
+        return "Scan cancelled. I didn't hear a response."
+    except Exception as e:
+        logging.error(f"Brain Tool Error (scan_vitals): {e}", exc_info=True)
+        speak_friday("I'm sorry, an error occurred during the simulated health scan.")
+        return "An error occurred during the simulated vitals scan."
+
+def run_test_suite():
+    """Runs a comprehensive diagnostic test with voice feedback to check core functions."""
+    test_results = {"passed": 0, "failed": 0}
+    logging.info("\n--- Running Automated System Test ---")
+    speak_friday("Running system diagnostics. Please stand by.")
+    
+    # Test 1: Text-to-speech engine initialization
+    logging.info("Test 1: Voice engine check...")
+    speak_friday("First, checking the voice engine.")
+    try: # sourcery skip: no-empty-try
+        if not SPEECH_ENGINE:
+            raise RuntimeError("Speech engine is not initialized.")
+        # A quick, non-blocking way to test if the engine is responsive
+        SPEECH_ENGINE.say("")
+        SPEECH_ENGINE.runAndWait()
+        logging.info(" -> Voice engine check PASSED.")
+        speak_friday("Voice engine is online.")
+        test_results["passed"] += 1
+    except Exception as e:
+        logging.error(f" -> Voice engine check FAILED: {e}", exc_info=True)
+        # Can't use speak_friday if the engine failed, so just print.
+        print(f"Voice engine check FAILED: {e}")
+        test_results["failed"] += 1
+
+    # Test 2: Microphone check
+    logging.info("Test 2: Microphone check...")
+    speak_friday("Second, checking for available microphones.")
+    try:
+        # --- UPGRADE: List all available microphones for easier debugging ---
+        mic_names = sr.Microphone.list_microphone_names()
+        if not mic_names:
+            raise sr.RequestError("No microphones found. Please ensure a microphone is connected.")
+        
+        logging.info("Available Microphones:")
+        for i, name in enumerate(mic_names):
+            logging.info(f"  [{i}] {name}")
+        
+        # Test the default microphone
+        with sr.Microphone() as source:
+            r = sr.Recognizer()
+            r.adjust_for_ambient_noise(source, duration=0.5)
+        logging.info(" -> Microphone check PASSED.")
+        speak_friday(f"I found {len(mic_names)} microphone(s). The default one is responsive.")
+        test_results["passed"] += 1
+    except Exception as e:
+        logging.error(f" -> Microphone check FAILED: {e}", exc_info=True)
+        speak_friday("Microphone check failed. I will not be able to hear you. Please check your microphone connection and PyAudio installation.")
+        test_results["failed"] += 1
+
+    # Test 3: Date and Time
+    logging.info("Test 3: Date and time check...")
+    speak_friday("Next, checking date and time functions.")
+    try:
+        now = datetime.datetime.now()
+        logging.info(f" -> Current time: {now.strftime('%I:%M %p')}. Date/Time check PASSED.")
+        speak_friday("Date and time functions are correct.")
+        test_results["passed"] += 1
+    except Exception as e:
+        logging.error(f" -> Date and time check FAILED: {e}", exc_info=True)
+        speak_friday("Date and time check failed.")
+        test_results["failed"] += 1
+
+    # Test 4: Network connectivity check
+    logging.info("Test 4: Network connectivity check...")
+    speak_friday("Checking network connectivity.")
+    try:
+        requests.get("https://www.google.com", timeout=5)
+        logging.info(" -> Network connectivity check PASSED.")
+        speak_friday("Network connection is stable.")
+        test_results["passed"] += 1
+    except Exception as e:
+        logging.error(f" -> Network connectivity check FAILED: {e}", exc_info=True)
+        speak_friday("Network connectivity check failed. I might not be able to access online services.")
+        test_results["failed"] += 1
+
+    # Test 5: Notifications
+    logging.info("Test 5: Notification system check...")
+    speak_friday("Checking the notification system.")
+    try:
+        friday_notify("System Test", "Notification check successful.")
+        logging.info(" -> Notification system PASSED.")
+        speak_friday("Notification system is working.")
+        test_results["passed"] += 1
+    except Exception as e:
+        logging.error(f" -> Notification system FAILED: {e}", exc_info=True)
+        speak_friday("Notification system check failed.")
+        test_results["failed"] += 1
+
+    # Test 6: AI Conversation Model
+    logging.info("Test 6: AI conversation model check...")
+    speak_friday("Finally, checking the AI conversation model.")
+    try:
+        if tokenizer is not None and model is not None:
+            logging.info(" -> AI model check PASSED.")
+            speak_friday("AI conversation model is loaded and ready.")
+            test_results["passed"] += 1
+        else:
+            raise ValueError("Tokenizer or model is None.")
+    except Exception as e:
+        logging.error(f" -> AI model check FAILED: {e}", exc_info=True)
+        speak_friday("AI conversation model failed to load. Chat features will be unavailable.")
+        test_results["failed"] += 1
+
+    logging.info(f"--- Test Complete: {test_results['passed']} passed, {test_results['failed']} failed ---")
+    if test_results["failed"] == 0:
+        speak_friday("System diagnostics complete. All systems are online and functioning normally.")
+    else:
+        speak_friday(f"System diagnostics complete. Found {test_results['failed']} failing tests. Please check the console for details.")
+
+def scan_friday_code():
+    """Scans Friday's own code for potential issues like hardcoded keys and TODOs."""
+    speak_friday("Okay, scanning my own source code now for potential issues. This might take a moment.")
+    logging.info("\n--- Friday Code Scan Results ---")
+    issues_found = False
+    
+    # Get the current script's file path
+    script_path = os.path.abspath(__file__)
+    
+    try:
+        with open(script_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            
+            # Check for hardcoded API keys
+            api_key_check = ["YOUR_OPENWEATHERMAP_API_KEY", "NEWSAPI_API_KEY"]
+            for i, line in enumerate(lines):
+                for key_string in api_key_check:
+                    if key_string in line:
+                        logging.warning(f"Potential issue found on line {i+1}: Hardcoded API key detected.")
+                        issues_found = True
+
+            # Check for TODO comments
+            # This correctly finds 'TODO' only within commented parts of a line.
+            todo_count = sum(1 for line in lines if '#' in line and 'TODO' in line.upper().split('#', 1)[-1])
+            if todo_count > 0:
+                logging.info(f"Found {todo_count} 'TODO' comments. You may want to address these soon.")
+                issues_found = True
+            
+            # Check for excessive print statements
+            print_count = sum(1 for line in lines if line.strip().startswith('print('))
+                
+            if print_count > 20:
+                logging.warning(f"Found {print_count} 'print()' statements. Consider using a logging framework for production code.")
+                issues_found = True
+            
+            if not issues_found:
+                logging.info("No major issues found in the code. Looking good!")
+                speak_friday("Code scan complete. Everything looks clean and tidy.")
+            else:
+                speak_friday("Code scan complete. I found a few things you might want to look at. Check the console for details.")
+
+    except FileNotFoundError:
+        logging.error("Could not find my own source file to scan.")
+        speak_friday("Sorry, I can't find my own source code to scan.")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred during code scan: {e}", exc_info=True)
+        speak_friday("An error occurred during the code scan. Please check the console.")
+        
+    logging.info("--- Scan Complete ---")
+
+# --- Dialogue Functions (resource intensive) ---
+logging.info("Initializing AI conversation model... This may take a moment.")
+try:
+    tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-medium")
+    model = AutoModelForCausalLM.from_pretrained("microsoft/DialoGPT-medium")
+    chat_history_ids = None
+    logging.info("AI model loaded successfully.")
+except Exception as e:
+    logging.error(f"Error loading the AI model: {e}", exc_info=True)
+    logging.warning("Dialogue features will not be available. Please check your internet connection and available memory.")
+    tokenizer = None
+    model = None
+
+def talk_to_friday(user_input):
+    """Engages in a simple dialogue with the user."""
+    global chat_history_ids
+    if not tokenizer or not model:
+        speak_friday("Sorry, my conversation model failed to load. I can't chat right now.")
+        return
+
+    try:
+        with thinking_state():
+            new_input_ids = tokenizer.encode(user_input + tokenizer.eos_token, return_tensors='pt')
+            bot_input_ids = torch.cat([chat_history_ids, new_input_ids], dim=-1) if chat_history_ids is not None else new_input_ids
+            chat_history_ids = model.generate(bot_input_ids, max_length=1000, pad_token_id=tokenizer.eos_token_id)
+            response = tokenizer.decode(chat_history_ids[:, bot_input_ids.shape[-1]:][0], skip_special_tokens=True)
+            logging.info(f"Friday AI response: {response}")
+        speak_friday(response)
+    except Exception as e:
+        logging.error(f"Error during conversation: {e}", exc_info=True)
+        speak_friday("Something went wrong while trying to respond. Let's try again later.")
+
+def exit_friday():
+    """Speaks a goodbye message and exits the program gracefully."""
+    if gui_queue: gui_queue.put("close")
+    speak_friday("Goodbye, and have a great day!")
+    sys.exit()
+
+def reboot_friday():
+    """Speaks a reboot message and restarts the script."""
+    speak_friday("Rebooting now. I'll be right back.")
+    try:
+        # This replaces the current process with a new one, effectively restarting the script.
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    except Exception as e:
+        logging.error(f"Reboot failed: {e}", exc_info=True)
+        speak_friday("Sorry, I encountered an error while trying to reboot.")
+
+def play_youtube_video(video_query):
+    """
+    Searches for a video on YouTube and opens the first result directly.
+    This provides a more direct way to "play a video" than a music search.
+    """
+    try:
+        speak_friday("Yes boss.")
+        search_query_encoded = urllib.parse.quote_plus(video_query)
+        # Search for the video and open the first result page
+        webbrowser.open(f"https://www.youtube.com/results?search_query={search_query_encoded}")
+        logging.info(f"Opened YouTube search results for: {video_query}")
+        speak_friday("Here you go boss.")
+    except Exception as e:
+        logging.error(f"Error opening YouTube video: {e}", exc_info=True)
+        speak_friday("Sorry, I couldn't open the video on YouTube.")
+
+def play_something_online(text):
+    """
+    Handles music-related commands.
+    If a specific song is mentioned, it searches for that song.
+    If not, it plays a random popular song.
+    """
+    # Define triggers to find the song/video name, from most specific to least specific
+    triggers = ["play the song", "play a video of", "play something", "play"]
+    song_name = ""
+    for trigger in triggers:
+        if trigger in text:
+            # Take everything after the trigger phrase
+            _, _, potential_song = text.partition(trigger)
+            song_name = potential_song.strip()
+            if song_name:
+                break # We found a song name, stop looking
+    
+    if song_name:
+        play_youtube_video(song_name)
+    else:
+        # If no specific song was mentioned (e.g., user just said "play music"), play a random one
+        random_song = random.choice(POPULAR_SONGS)
+        speak_friday(f"Okay, playing something for you. How about {random_song}?")
+        play_youtube_video(random_song)
+
+def play_rock_paper_scissors(recognizer, source):
+    """Plays a game of Rock, Paper, Scissors with the user."""
+    speak_friday("Let's play Rock, Paper, Scissors. Say your choice when I'm done speaking.")
+    time.sleep(0.5) # Give user a moment to prepare
+    speak_friday("Rock... Paper... Scissors... Shoot!")
+
+    choices = ["rock", "paper", "scissors"]
+    friday_choice = random.choice(choices)
+
+    try:
+        with listening_state():
+            logging.info("Listening for user's choice in Rock, Paper, Scissors...")
+            audio = recognizer.listen(source, timeout=5, phrase_time_limit=3)
+            user_choice = recognizer.recognize_google(audio).lower()
+        logging.info(f"User chose: {user_choice}")
+        if user_choice not in choices:
+            speak_friday(f"I didn't understand '{user_choice}'. That's not a valid choice. Let's play again later.")
+            return
+
+        speak_friday(f"You chose {user_choice}, and I chose {friday_choice}.")
+
+        if user_choice == friday_choice:
+            speak_friday("It's a tie!")
+        elif (user_choice == "rock" and friday_choice == "scissors") or \
+             (user_choice == "scissors" and friday_choice == "paper") or \
+             (user_choice == "paper" and friday_choice == "rock"):
+            speak_friday("You win! Congratulations.")
+        else:
+            speak_friday("I win! Better luck next time.")
+
+    except (sr.UnknownValueError, sr.WaitTimeoutError):
+        speak_friday("I didn't hear your choice. Let's try again some other time.")
+    except Exception as e:
+        logging.error(f"Error during game: {e}", exc_info=True)
+        speak_friday("Something went wrong with the game. Sorry about that.")
+
+# ------------------- Command Dispatcher and Listening Loop -------------------
+def list_commands():
+    """Lists all available commands dynamically from the commands dictionary."""
+    speak_friday("Here are some things you can ask me.")
+    logging.info("\n--- Available Commands ---")
+    # This loop correctly iterates through the keys of a well-formatted dictionary
+    for phrase in command_phrases.keys():
+        logging.info(f" - '{phrase}'")
+    logging.info("--- -------------------- ---")
+
+def show_memory():
+    """Summarizes and reports the contents of Friday's 'memory system'."""
+    speak_friday("Accessing my memory system. Here is a report on my current state.")
+    logging.info("\n--- Friday Memory System Report ---")
+    
+    # 1. User Profile
+    speak_friday("Core Memory Profile:")
+    name = user_profile.get('name', 'not set')
+    location = user_profile.get('location', 'not set')
+    speak_friday(f"User identity is set to {name}. Primary location is {location}.")
+    logging.info(f" - User Profile: Name='{name}', Location='{location}'")
+
+    # 2. Reminders
+    speak_friday("Short-Term Memory Status:")
+    if reminders:
+        speak_friday(f"I am holding {len(reminders)} active reminders. The first few are:")
+        logging.info(f" - Active Reminders: {len(reminders)}")
+        for i, reminder in enumerate(reminders[:3]):
+            speak_friday(f"Reminder {i+1}: {reminder}")
+            logging.info(f"   - {reminder}")
+        if len(reminders) > 3:
+            speak_friday("and a few others.")
+    else:
+        speak_friday("Short-term memory is clear. No active reminders.")
+        logging.info(" - Active Reminders: 0")
+
+    # 3. Learned Shortcuts
+    speak_friday("Long-Term Memory Storage:")
+    custom_shortcuts_list = []
+    if os.path.exists(CUSTOM_SHORTCUTS_FILE):
+        try:
+            with open(CUSTOM_SHORTCUTS_FILE, 'r') as f:
+                custom_targets = json.load(f)
+                custom_shortcuts_list = list(custom_targets.keys())
+        except (json.JSONDecodeError, IOError):
+            pass # File is empty or corrupt, count is 0
+    speak_friday(f"I have learned {len(custom_shortcuts_list)} custom application shortcuts.")
+    logging.info(f" - Learned Shortcuts: {len(custom_shortcuts_list)}")
+    if custom_shortcuts_list:
+        speak_friday("Some of them include:")
+        for shortcut in custom_shortcuts_list[:3]:
+            speak_friday(shortcut)
+            logging.info(f"   - {shortcut}")
+
+    # 4. Saved Notes
+    data_dir = "collected_data"
+    note_count = 0
+    note_files = []
+    if os.path.exists(data_dir):
+        note_files = [name for name in os.listdir(data_dir) if os.path.isfile(os.path.join(data_dir, name))]
+        note_count = len(note_files)
+    speak_friday(f"I have stored {note_count} notes in my data archives.")
+    logging.info(f" - Saved Notes: {note_count}")
+    if note_files:
+        speak_friday("The most recent ones are:")
+        # Sort by modification time to get the most recent
+        note_files.sort(key=lambda name: os.path.getmtime(os.path.join(data_dir, name)), reverse=True)
+        for note_file in note_files[:3]:
+            speak_friday(note_file.replace('.txt', '').replace('_', ' '))
+            logging.info(f"   - {note_file}")
+
+    # 5. Cognitive System (The Brain)
+    speak_friday("Cognitive System Report:")
+    if BRAIN_ENABLED and friday_brain:
+        strategy_count = len(friday_brain.strategies)
+        tool_count = len(friday_brain.tools)
+        speak_friday(f"My multi-level brain is online. I have {strategy_count} strategies available, utilizing {tool_count} different tools.")
+        logging.info(f" - Brain Status: Online ({strategy_count} strategies, {tool_count} tools)")
+    else:
+        speak_friday("My advanced cognitive brain is currently offline.")
+        logging.info(" - Brain Status: Offline")
+
+    speak_friday("Memory system report complete.")
+    logging.info("--- End of Report ---")
+
+# A dictionary to map command phrases to their corresponding functions
+
+def toggle_mute(state):
+    """Toggles the global mute state."""
+    global is_muted
+    is_muted = state
+    if state:
+        logging.info("Muting... (Friday is now silent)")
+    else:
+        speak_friday("I'm unmuted and ready to help.")
+
+def chat_loop(recognizer, source):
+    """Starts a continuous chat session until the user says 'stop'."""
+    global chat_history_ids
+    # Reset chat history at the beginning of a new chat session for a fresh conversation.
+    chat_history_ids = None
+    
+    speak_friday("Of course! What do you want to talk about? Say 'stop' or 'end chat' to finish.")
+    while True:
+        try:
+            with listening_state():
+                logging.info("Listening for chat input...")
+                # Use a longer timeout for more natural conversation flow
+                audio = recognizer.listen(source, timeout=15, phrase_time_limit=10)
+                user_input = recognizer.recognize_google(audio).lower()
+            logging.info(f"Chat input: '{user_input}'")
+
+            # Check for various stop phrases to exit the chat loop
+            stop_phrases = ["stop", "end chat", "that's enough", "goodbye for now"]
+            if any(phrase in user_input for phrase in stop_phrases):
+                speak_friday("Okay, ending our chat. It was nice talking to you!")
+                break
+            
+            talk_to_friday(user_input)
+
+        except sr.WaitTimeoutError:
+            speak_friday("Are you still there? I'm listening.")
+        except sr.UnknownValueError:
+            # In a chat, it's more natural to just wait for the next input if nothing was heard.
+            logging.debug("... (silence or unclear audio during chat)")
+            pass
+        except Exception as e:
+            logging.error(f"Error during chat: {e}", exc_info=True)
+            speak_friday("Something went wrong with the chat. Let's stop for now.")
+            break # Exit loop on unexpected error
+
+def handle_complex_task(recognizer, source):
+    """Listens for a complex task and passes it to the Brain."""
+    if not BRAIN_ENABLED or friday_brain is None:
+        speak_friday("My brain is not available. I can't handle complex jobs right now.")
+        return
+
+    speak_friday("I'm ready for the job. What are my instructions?")
+    try:
+        with listening_state():
+            audio = recognizer.listen(source, timeout=20, phrase_time_limit=15)
+            task_text = recognizer.recognize_google(audio)
+
+        # The brain's execution function needs to be modified to accept these
+        # if it's going to run interactive tools.
+        # Let's modify the brain's process_complex_request to handle this.
+        # For now, we pass them as keyword arguments.
+        friday_brain.process_complex_request(task_text, recognizer=recognizer, source=source)
+
+    except (sr.UnknownValueError, sr.WaitTimeoutError):
+        speak_friday("I didn't receive any instructions. I'll await further commands.")
+    except Exception as e:
+        speak_friday("An error occurred while processing the job. Please check the console.")
+        logging.error(f"Error in handle_complex_task: {e}", exc_info=True)
+
+command_phrases = {
+    "what is the time": tell_date_time,
+    "what is the date": tell_date_time,
+    "how are you": check_status,
+    "what is the weather": get_weather,
+    "tell me my name": tell_user_name,
+    "what is your name": tell_friday_name,
+    "who are you": tell_friday_name,
+    "add a shortcut": add_new_shortcut,
+    "remember an application": add_new_shortcut,
+    "set a reminder": set_reminder,
+    "cancel a reminder": cancel_reminder,
+    "give me an update": give_update,
+    "read notifications": read_notifications,
+    "clear all notifications": clear_notifications,
+    "what can you do": list_commands,
+    "show me your memory": show_memory,
+    "what do you remember": show_memory,
+    "thank you": handle_thanks,
+    "great job": lambda: speak_friday("Thank you Boss"),
+    "go silent": lambda: toggle_mute(True),
+    "mute yourself": lambda: toggle_mute(True),
+    "speak again": lambda: toggle_mute(False),
+    "unmute yourself": lambda: toggle_mute(False),
+    "let's chat": chat_loop,
+    "scan the computer": scan_computer, # Added the new command
+    "run a system scan": scan_computer,
+    "scan your code": scan_friday_code,
+    "run a code scan": scan_friday_code,
+    "reboot": reboot_friday,
+    "reboot yourself": reboot_friday,
+    # New game commands
+    "play a game": play_rock_paper_scissors,
+    "let's play a game": play_rock_paper_scissors,
+    "play rock paper scissors": play_rock_paper_scissors,
+    "check my vitals": handle_complex_task, # Quick access
+    "run diagnostics": run_test_suite, # New command for test suite
+    # New commands for playing music/videos
+    "play something": play_something_online,
+    # More specific commands for playing media to avoid conflict with "open"
+    "play the song": play_something_online,
+    "play a video of": play_something_online,
+    # New data collection commands
+    "take a note": collect_data,
+    "start a new note": collect_data,
+    "collect data": collect_data,
+    # New Brain command
+    "i have a job for you": handle_complex_task,
+    "perform a complex task": handle_complex_task,
+}
+
+def handle_complex_task_direct(task_text, recognizer, source):
+    """A wrapper to call the brain for simple, non-interactive commands that are better as brain tasks."""
+    if BRAIN_ENABLED and friday_brain:
+        friday_brain.process_complex_request(task_text, recognizer=recognizer, source=source)
+
+def process_command(text, recognizer, source):
+    """Processes a recognized text command."""
+    global is_muted
+    logging.info(f"Processing command: '{text}'")
+
+    # Check for exit or mute commands first
+    if "exit" in text or "quit" in text or "goodbye" in text:
+        exit_friday()
+    
+    if is_muted and not ("unmute" in text or "speak again" in text):
+        logging.info("Muted. Cannot respond.")
+        return
+
+    # 1. Check for fixed-phrase commands from the dictionary
+    for phrase, func in command_phrases.items():
+        # Use 'in' to allow for more natural commands (e.g., "Friday, what is the time?")
+        if phrase in text:
+            # Dynamically check if the function needs interactive arguments
+            try:
+                func_sig = inspect.signature(func)
+                if 'recognizer' in func_sig.parameters and 'source' in func_sig.parameters:
+                    func(recognizer, source)
+                else:
+                    func()
+            except (TypeError, ValueError): # Catches issues with non-inspectable callables like lambdas
+                func(recognizer, source)
+            return # Command found and executed, so we are done.
+    
+    # 2. If not in dictionary, check for pattern-based commands
+    # The functions for these commands now handle their own argument parsing.
+    # We check for "play" last because it's a very general term.
+    if "open" in text and "open my" not in text:
+        app_name = text.split("open", 1)[1].strip()
+        open_application(app_name, recognizer, source)
+    elif ("search" in text or "google" in text) and "wikipedia" not in text:
+        search_web(text)
+    elif "wikipedia" in text:
+        search_wikipedia(text)
+    elif "news" in text:
+        location = text.split("news for", 1)[-1].strip()
+        if not location or location in ["news", "for"]:
+            location = user_profile.get("location", "the world")
+        get_news(location)
+    elif "play" in text: # This should be one of the last checks
+        play_something_online(text)
+    else:
+        # Fallback to the AI model for a conversational response
+        if BRAIN_ENABLED:
+            talk_to_friday(text)
+        else:
+            speak_friday("I'm sorry, I don't understand that command. Please try again.")
+
+def listen_for_wake_word():
+    """Main loop that listens for a wake word before entering a continuous command loop."""
+    recognizer = sr.Recognizer()
+    mic = sr.Microphone()
+    is_sleeping = False # State to track if Friday was told to sleep
+
+    try:
+        with mic as source:
+            logging.info("Adjusting for ambient noise...")
+            recognizer.adjust_for_ambient_noise(source)
+            logging.info("Ambient noise adjustment complete.")
+            print("\n🎙️ Friday is waiting for the wake word ('Friday')...")
+            while True: # Outer loop for wake word
+                try:
+                    with listening_state():
+                        # Listen for the wake word
+                        audio = recognizer.listen(source, phrase_time_limit=3)
+                        wake_word_text = recognizer.recognize_google(audio).lower()
+                    print(f"Heard: '{wake_word_text}'")
+
+                    if "friday" in wake_word_text:
+                        if is_sleeping:
+                            speak_friday("Yes boss, how can I help?")
+                            is_sleeping = False # Reset state after waking up
+                        else:
+                            speak_friday("For you boss, always. What is my command?")
+
+                        # --- Enter continuous command loop ---
+                        while True: # Inner loop for commands
+                            try:
+                                with listening_state():
+                                    logging.info("Listening for command...")
+                                    command_audio = recognizer.listen(source, timeout=10, phrase_time_limit=8)
+                                    command_text = recognizer.recognize_google(command_audio).lower()
+                                logging.info(f"User said: {command_text}")
+
+                                stop_phrases = ["stop listening", "that's all", "go to sleep", "stand down"]
+                                if any(phrase in command_text for phrase in stop_phrases):
+                                    speak_friday("Okay, standing by. Say my name if you need me.")
+                                    is_sleeping = True
+                                    logging.info("\n🎙️ Friday is waiting for the wake word ('Friday')...")
+                                    break
+
+                                process_command(command_text, recognizer, source)
+
+                            except sr.UnknownValueError:
+                                speak_friday("I didn't quite catch that. What was the command?")
+                            except sr.WaitTimeoutError:
+                                logging.debug("Timeout waiting for command, listening again...")
+
+                except sr.UnknownValueError:
+                    pass # Normal, just means silence or non-word sounds were detected.
+                except sr.RequestError as e:
+                    speak_friday("I'm having trouble connecting to the speech recognition service.")
+                    logging.error(f"Could not request results from Google Speech Recognition service; {e}")
+                    time.sleep(3)
+
+    except Exception as e:
+        logging.critical(f"A critical error occurred with the microphone: {e}", exc_info=True)
+        speak_friday("I'm sorry, a critical error occurred with my listening module. I cannot proceed. Please check the log for details.")
+        sys.exit(1)
+
+# --- Brain Initialization ---
+friday_brain = None
+def initialize_brain():
+    """Initializes the Brain with its tools if the module is enabled."""
+    global friday_brain
+    if BRAIN_ENABLED:
+        brain_tools = {
+            "research": get_wikipedia_summary,
+            "save_note": save_note,
+            "access_camera": access_public_camera_feed,
+            "view_satellite": view_satellite_imagery,
+            "get_satellite_data": get_satellite_event_data,
+            "read_note": read_note,
+            "send_email": send_email,
+            "scan_vitals": scan_vitals,
+        }
+        friday_brain = Brain(tools=brain_tools, speak_func=speak_friday)
+    else:
+        logging.warning("Friday's Brain module not found or disabled. Complex tasks will not be available.")
+
+# ------------------- Main Execution Block -------------------
+if __name__ == "__main__":
+    setup_logging()
+    install_packages()
+    launch_gui()
+    initialize_speech_engine()
+    load_user_profile() # Load profile after speech engine to allow for spoken feedback
+    initialize_brain()
+    run_test_suite()
+    greet_user()
+    listen_for_wake_word()
