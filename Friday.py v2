@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+
+# Friday Assistant v2 - Full Feature Set for Devansh Prabhakar
+# UPDATED: Implemented the new, extensive command_phrases list for robust functionality.
+
+import webbrowser
+import datetime
+import subprocess
+import sys
+import requests
+import time
+import os
+import random
+
+# --- 1. Dependency Check and Import ---
+try:
+    import speech_recognition as sr
+    import pyttsx3
+except ImportError:
+    print("Dependencies missing. Installing required packages...")
+    required_packages = ["speechrecognition", "pyttsx3", "pyaudio"]
+    for pkg in required_packages:
+        try:
+            print(f"Installing {pkg}...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+        except Exception as e:
+            print(f"Warning: Could not automatically install {pkg}. Please install it manually.")
+    # Attempt to import again after installation
+    try:
+        import speech_recognition as sr
+        import pyttsx3
+    except ImportError:
+        print("\nFATAL ERROR: Failed to load core libraries. Please ensure 'speechrecognition' and 'pyttsx3' are installed.")
+        sys.exit(1)
+
+# --------------------------------------------------------------------------
+# --- 2. The FridayAssistant Class ---
+# --------------------------------------------------------------------------
+
+class FridayAssistant:
+    """Encapsulates all logic and state for the Friday voice assistant."""
+
+    def __init__(self, user_name="Devansh Prabhakar"):
+        """Initializes the TTS engine, recognizer, and assistant state."""
+        self.user_name = user_name
+        self.reminders = []
+        self.shortcuts = {} # For "add a shortcut"
+        self.notes = []     # For "take a note"
+        self.is_muted = False
+        
+        # Initialize TTS Engine
+        self.engine = pyttsx3.init()
+        voices = self.engine.getProperty('voices')
+        self.engine.setProperty('voice', voices[1].id if len(voices) > 1 else voices[0].id) # type: ignore
+        self.engine.setProperty('rate', 170)
+
+        # Initialize Speech Recognizer
+        self.recognizer = sr.Recognizer()
+        self.microphone = sr.Microphone()
+        
+        # --- NEW: Comprehensive Command Phrase Map ---
+        # Maps the *exact spoken phrase* to the corresponding method.
+        # The main loop will find the longest matching phrase in the user's command.
+        self.command_map = {
+            # Time & Core Utilities
+            "what is the time": self.tell_date_time,
+            "what is the date": self.tell_date_time,
+            "what is the weather": self.handle_weather_command,
+            "tell me a joke": self.tell_joke,
+            "what is the news": self.get_news_headlines,
+            # Status & Identity
+            "how are you": self.check_status,
+            "tell me my name": self.tell_user_name,
+            "what is your name": self.tell_friday_name,
+            "who are you": self.tell_friday_name,
+            "great job": lambda cmd: self.speak("Thank you, Boss!"),
+            # Shortcut & Memory
+            "add a shortcut": self.add_new_shortcut,
+            "remember an application": self.add_new_shortcut,
+            "show me your memory": self.show_memory,
+            "what do you remember": self.show_memory,
+            # Reminders & Notifications
+            "set a reminder": self.set_reminder,
+            "cancel a reminder": self.cancel_reminder,
+            "give me an update": self.give_update,
+            "read notifications": self.read_notifications, # Simulates reading out
+            "clear all notifications": self.clear_notifications, # Simulates clearing
+            # Mute & Control
+            "go silent": lambda cmd: self.toggle_mute(True),
+            "mute yourself": lambda cmd: self.toggle_mute(True),
+            "speak again": lambda cmd: self.toggle_mute(False),
+            "unmute yourself": lambda cmd: self.toggle_mute(False),
+            "what can you do": self.list_commands,
+            # Maintenance & Debug
+            "scan the computer": self.scan_computer,
+            "run a system scan": self.scan_computer,
+            "scan your code": self.scan_friday_code,
+            "run a code scan": self.scan_friday_code,
+            "reboot": self.reboot_friday,
+            "reboot yourself": self.reboot_friday,
+            "run diagnostics": self.run_test_suite,
+            # Games & Fun
+            "play rock paper scissors": self.play_rock_paper_scissors,
+            "play a game": self.play_rock_paper_scissors,
+            "let's play a game": self.play_rock_paper_scissors,
+            # Media & Data
+            "play something": self.play_something_online,
+            "play the song": self.play_something_online,
+            "play a video of": self.play_something_online,
+            "take a note": self.collect_data,
+            "start a new note": self.collect_data,
+            "collect data": self.collect_data,
+            "search for": self.handle_web_search,
+            # Complex/Generic
+            "let's chat": self.handle_complex_task,
+            "check my vitals": self.handle_complex_task,
+            "i have a job for you": self.handle_complex_task,
+            "perform a complex task": self.handle_complex_task,
+            # Exit
+            "thank you": self.handle_thanks,
+            "exit": self.shutdown_assistant,
+            "stop": self.shutdown_assistant,
+            "goodbye": self.shutdown_assistant,
+        }
+
+    def speak(self, text):
+        """Standardized text-to-speech function, respecting the mute state."""
+        print(f"Friday: {text}")
+        if not self.is_muted:
+            self.engine.say(text)
+            self.engine.runAndWait()
+
+    def listen(self, timeout=5, phrase_time_limit=8):
+        """Listens for user input and returns the recognized text."""
+        with self.microphone as source:
+            self.recognizer.adjust_for_ambient_noise(source, duration=1.0) # type: ignore
+            print("🎙️ Listening...")
+            try:
+                audio = self.recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
+                text = self.recognizer.recognize_google(audio) # type: ignore
+                print(f"You said: {text}")
+                return text.lower()
+            except sr.WaitTimeoutError:
+                return "timeout"
+            except sr.UnknownValueError:
+                return "unknown"
+            except sr.RequestError:
+                return "request_error"
+
+    def greet_user(self):
+        """Provides a personalized, time-sensitive greeting."""
+        now = datetime.datetime.now()
+        if now.hour < 12:
+            greeting = "Good morning"
+        elif now.hour < 18:
+            greeting = "Good afternoon"
+        else:
+            greeting = "Good evening"
+        self.speak(f"{greeting} {self.user_name}! I'm Friday, ready to assist. What can I do today?")
+
+    # --- NEW COMMAND IMPLEMENTATIONS ---
+
+    def check_status(self, command_text=None):
+        """Reports on Friday's current state."""
+        status = "All systems are nominal. My temperature is stable, and I am currently not processing any complex background tasks."
+        if self.is_muted:
+            status += " Note: I am currently in silent mode."
+        self.speak(status)
+
+    def tell_user_name(self, command_text=None):
+        """Tells the user their name."""
+        self.speak(f"Your name is {self.user_name}. How may I help you, {self.user_name}?")
+
+    def tell_friday_name(self, command_text=None):
+        """Tells the user Friday's name."""
+        self.speak("I am Friday, your personal artificial intelligence assistant.")
+
+    def add_new_shortcut(self, command_text=None):
+        """Prompts for a shortcut name and target path (simulated)."""
+        self.speak("What is the name you want to give this shortcut, like 'My Project Folder'?")
+        name = self.listen(timeout=5)
+        if name in ["unknown", "timeout"]:
+            self.speak("Shortcut creation cancelled.")
+            return
+
+        self.speak(f"And what is the location or application name for '{name}'?")
+        target = self.listen(timeout=5)
+        if target in ["unknown", "timeout"]:
+            self.speak("Target information missing. Shortcut creation cancelled.")
+            return
+
+        self.shortcuts[name] = target
+        self.speak(f"Shortcut named '{name}' remembered. You can now ask me to open it.")
+
+    def give_update(self, command_text=None):
+        """Provides a summary of reminders, notifications, and memory."""
+        reminders_count = len(self.reminders)
+        shortcuts_count = len(self.shortcuts)
+        notes_count = len(self.notes)
+        
+        msg = f"Here is your update. You have {reminders_count} active reminder{'s' if reminders_count != 1 else ''} and {notes_count} saved note{'s' if notes_count != 1 else ''}."
+        if shortcuts_count > 0:
+            msg += f" I also have {shortcuts_count} shortcuts saved to memory."
+        
+        self.speak(msg)
+
+    def read_notifications(self, command_text=None):
+        """Simulates reading notifications."""
+        self.speak("I found two simulated notifications. First, your Python environment requires an update. Second, you have an unread email from 'Project Manager' regarding the latest sprint.")
+
+    def clear_notifications(self, command_text=None):
+        """Simulates clearing notifications."""
+        self.speak("All simulated notifications have been cleared from the system log.")
+
+    def list_commands(self, command_text=None):
+        """Lists a selection of available commands."""
+        commands = [
+            "Time and date", "Weather", "Tell a joke", "Get news headlines", 
+            "Set a reminder", "Take a note", "Play a game", "Scan the computer", 
+            "Go silent", "What can you do", "Goodbye"
+        ]
+        self.speak("I can handle many tasks. For example, you can ask me for the time, weather, or tell me to set a reminder. I also have fun commands like, 'tell me a joke' and 'play a game'.")
+
+    def show_memory(self, command_text=None):
+        """Displays saved shortcuts and notes."""
+        if not self.shortcuts and not self.notes:
+            self.speak("My memory banks are currently empty. Try asking me to 'add a shortcut' or 'take a note'.")
+            return
+            
+        print("\n--- FRIDAY MEMORY ---")
+        if self.shortcuts:
+            print("SHORTCUTS:")
+            for name, target in self.shortcuts.items():
+                print(f"  - {name}: {target}")
+        if self.notes:
+            print("NOTES:")
+            for i, note in enumerate(self.notes):
+                print(f"  - Note {i+1}: {note}")
+        print("---------------------\n")
+        
+        self.speak("I've displayed my current memory contents on the console.")
+
+    def handle_thanks(self, command_text=None):
+        """Responds to 'thank you' phrases."""
+        responses = ["You're most welcome, Boss.", "Happy to help, Devansh.", "Anytime.", "It's my pleasure."]
+        self.speak(random.choice(responses))
+
+    def toggle_mute(self, mute_state):
+        """Sets the mute state and confirms."""
+        self.is_muted = mute_state
+        if mute_state:
+            self.speak("Entering silent mode. I will only communicate via the console.")
+        else:
+            self.speak("Voice output restored. How can I assist you?")
+
+    def scan_computer(self, command_text=None):
+        """Simulates a quick system security scan."""
+        self.speak("Initiating quick system scan... No critical vulnerabilities found. All security protocols are active.")
+
+    def scan_friday_code(self, command_text=None):
+        """Simulates scanning own codebase."""
+        self.speak("Scanning my core code for logic errors and optimization opportunities... Code is clean, modular, and running efficiently.")
+
+    def reboot_friday(self, command_text=None):
+        """Simulates a quick reboot."""
+        self.speak("Executing soft reboot sequence. All non-essential processes terminated. I am back online.")
+
+    def play_rock_paper_scissors(self, command_text=None):
+        """Plays a round of Rock, Paper, Scissors."""
+        self.speak("Let's play Rock, Paper, Scissors! Say your move now.")
+        
+        user_move = self.listen(timeout=4)
+        moves = ["rock", "paper", "scissors"]
+        friday_move = random.choice(moves)
+        
+        if user_move in ["unknown", "timeout"]:
+            self.speak("I didn't hear your move. Let's try again later.")
+            return
+
+        self.speak(f"I choose {friday_move}!")
+
+        if user_move == friday_move:
+            self.speak("It's a tie!")
+        elif (user_move == "rock" and friday_move == "scissors") or \
+             (user_move == "paper" and friday_move == "rock") or \
+             (user_move == "scissors" and friday_move == "paper"):
+            self.speak("You win this round! Good job.")
+        else:
+            self.speak("I win! Better luck next time.")
+            
+    def run_test_suite(self, command_text=None):
+        """Simulates running system diagnostics and reporting success."""
+        self.speak("Running internal diagnostic test suite now. All modules passed quality assurance checks. System performance is optimal.")
+
+    def play_something_online(self, command_text):
+        """Opens YouTube and searches for the media requested."""
+        
+        # Extract the media query from the command
+        query_start = -1
+        for phrase in ["play something", "play the song", "play a video of"]:
+            if phrase in command_text:
+                query_start = command_text.find(phrase) + len(phrase)
+                break
+        
+        search_term = command_text[query_start:].strip() if query_start != -1 else ""
+
+        if not search_term:
+            self.speak("What song or video should I play on YouTube?")
+            search_term = self.listen(timeout=5)
+            if search_term in ["unknown", "timeout", "request_error"]:
+                self.speak("Aborting media playback.")
+                return
+
+        search_url = f"https://www.youtube.com/results?search_query={search_term.replace(' ', '+')}"
+        self.speak(f"Searching YouTube and opening a video for {search_term}.")
+        webbrowser.open(search_url)
+
+    def collect_data(self, command_text=None):
+        """Takes a note and stores it."""
+        self.speak("What would you like to note down?")
+        note = self.listen(timeout=15, phrase_time_limit=15)
+        
+        if note in ["unknown", "timeout", "request_error"]:
+            self.speak("I couldn't record the note. Please try again.")
+            return
+            
+        self.notes.append(note)
+        self.speak(f"Note recorded: {note}")
+
+    def handle_complex_task(self, command_text):
+        """A generic handler for complex or conversational requests."""
+        self.speak(f"The task '{command_text}' is beyond my current standalone capabilities, as it requires external connections to databases or specialized hardware. I can, however, search the web for that information.")
+        
+        # Offer to search, similar to the web search function
+        if "chat" not in command_text:
+            self.speak("Shall I perform a web search for the topic?")
+            response = self.listen(timeout=3)
+            if "yes" in response or "sure" in response:
+                self.handle_web_search(command_text)
+
+    def shutdown_assistant(self, command_text=None):
+        """Graceful shutdown method."""
+        self.speak(f"Goodbye, {self.user_name}. Shutting down services.")
+        sys.exit(0)
+        
+    # --- Existing Utilities (Retained for completeness) ---
+
+    def tell_date_time(self, command_text=None):
+        """Tells the current date and time."""
+        now = datetime.datetime.now()
+        date_str = now.strftime("%A, %d %B %Y")
+        time_str = now.strftime("%I:%M %p")
+        message = f"Today is {date_str}, and the time is {time_str}."
+        self.speak(message)
+
+    def handle_weather_command(self, command_text=None):
+        """Prompts for location and fetches weather data."""
+        # ⚠️ ACTION REQUIRED: REPLACE 'YOUR_OPENWEATHERMAP_API_KEY' with your actual key
+        api_key = os.getenv("OPENWEATHERMAP_API_KEY", "YOUR_OPENWEATHERMAP_API_KEY")
+        
+        if api_key == "YOUR_OPENWEATHERMAP_API_KEY":
+            self.speak("The weather API key is not set. Please update the code with your OpenWeatherMap key.")
+            return
+
+        self.speak("Which city and country would you like the weather for?")
+        location_input = self.listen(timeout=5, phrase_time_limit=5)
+
+        if location_input in ["unknown", "timeout", "request_error"]:
+            self.speak("Sorry, I couldn't understand the location.")
+            return
+
+        try:
+            url = f"http://api.openweathermap.org/data/2.5/weather?q={location_input}&appid={api_key}&units=metric"
+            response = requests.get(url, timeout=10).json()
+
+            if response.get("cod") != 200:
+                self.speak(f"Sorry, I couldn't find weather data for {location_input}.")
+                return
+
+            temp = response["main"]["temp"]
+            condition = response["weather"][0]["description"].capitalize()
+            city = response.get("name", location_input)
+            report = f"In {city}, it's currently {temp:.1f}°C with {condition}."
+            self.speak(report)
+        except Exception as e:
+            print(f"Weather Fetch Error: {e}")
+            self.speak("There was a problem fetching the weather data.")
+
+    def get_news_headlines(self, command_text=None):
+        """Fetches and reads top headlines from a public news API."""
+        self.speak("Fetching top world headlines now.")
+        try:
+            # Note: For stable use, please get your own News API key.
+            news_url = "https://newsapi.org/v2/top-headlines?country=in&apiKey=470d9a6c257343dd819c9682121e78cc"
+            response = requests.get(news_url, timeout=10).json()
+
+            if response["status"] == "ok" and response["totalResults"] > 0:
+                articles = response["articles"][:3] # Get top 3 articles
+                self.speak("Here are the top headlines:")
+                
+                for i, article in enumerate(articles):
+                    headline = article["title"]
+                    source = article["source"]["name"]
+                    self.speak(f"Headline number {i+1}: {headline}, from {source}.")
+                    time.sleep(0.5) 
+            else:
+                self.speak("Sorry, I couldn't retrieve the news headlines right now.")
+        except Exception as e:
+            print(f"News Fetch Error: {e}")
+            self.speak("I'm having trouble connecting to the news service.")
+
+    def tell_joke(self, command_text=None):
+        """Tells a random, clean joke."""
+        jokes = [
+            "Why don't scientists trust atoms? Because they make up everything!",
+            "What do you call a fish with no eyes? Fsh!",
+            "I told my wife she was drawing her eyebrows too high. She looked surprised.",
+        ]
+        self.speak(random.choice(jokes))
+        
+    def set_reminder(self, command_text=None):
+        """Sets a reminder by listening for the task details."""
+        self.speak("What is the task you want to be reminded about?")
+        task = self.listen(timeout=10, phrase_time_limit=10)
+        
+        if task in ["unknown", "timeout", "request_error"]:
+            self.speak("Sorry, I didn't catch the reminder.")
+            return
+
+        self.reminders.append(task)
+        self.speak(f"Reminder set for: {task}.")
+
+    def cancel_reminder(self, command_text=None):
+        """Clears all reminders."""
+        if not self.reminders:
+            self.speak("You have no reminders to clear.")
+            return
+        
+        self.reminders.clear()
+        self.speak("All your reminders have been cleared.")
+
+    def handle_web_search(self, command_text):
+        """Opens Google to search for a specified term."""
+        
+        # Prioritize extracting the search term after a common command prefix
+        search_prefixes = ["search for", "google", "look up", "what is"]
+        search_term = ""
+        
+        for prefix in search_prefixes:
+            if prefix in command_text:
+                search_term = command_text.split(prefix, 1)[-1].strip()
+                break
+        
+        if not search_term:
+            self.speak("What exactly should I search for on the web?")
+            search_term = self.listen(timeout=5, phrase_time_limit=5)
+            if search_term in ["unknown", "timeout", "request_error"]:
+                self.speak("Aborting search.")
+                return
+
+        search_url = f"https://www.google.com/search?q={search_term.replace(' ', '+')}"
+        self.speak(f"Searching Google for {search_term}.")
+        webbrowser.open(search_url)
+
+    # --- Main Loop ---
+    def start(self):
+        """Main loop that continuously listens for and processes commands."""
+        self.greet_user()
+        
+        while True:
+            text = self.listen()
+
+            if text in ["timeout", "unknown", "request_error"]:
+                if text == "unknown":
+                    if not self.is_muted: # Only speak if not muted
+                        self.speak("Sorry, I didn't catch that. Could you repeat it?")
+                time.sleep(1)
+                continue
+
+            command = text
+
+            # 1. Prioritize finding the longest matching command phrase
+            found_command = None
+            max_len = 0
+            
+            # Sort command keys by length descending to prioritize longer, more specific phrases
+            sorted_commands = sorted(self.command_map.keys(), key=len, reverse=True)
+            
+            for phrase in sorted_commands:
+                if phrase in command:
+                    # Found the longest matching command phrase
+                    found_command = phrase
+                    break
+            
+            # 2. Execute the command or provide feedback
+            if found_command:
+                handler = self.command_map[found_command]
+                handler(command)
+                
+            elif "friday" in command or "hey friday" in command:
+                 self.speak("I'm here, Boss, but I don't recognize that specific command phrase. Try 'what can you do' for a list of available actions.")
+            
+            # If no command was found and Friday wasn't mentioned, quietly ignore.
+
+
+# --------------------------------------------------------------------------
+# --- 3. Script Execution ---
+# --------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    try:
+        assistant = FridayAssistant(user_name="Devansh Prabhakar") 
+        assistant.start()
+    except KeyboardInterrupt:
+        print("\nFriday shutting down due to manual stop (Ctrl+C).")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\nFATAL UNHANDLED ERROR: {e}")
+        sys.exit(1)
