@@ -1,0 +1,1097 @@
+#!/usr/bin/env python3
+
+# --- Friday v3: Now with an AI Brain and Enhanced Voice ---
+# Friday Assistant v2 - Full Feature Set for Devansh Prabhakar
+# UPDATED: Implemented the new, extensive command_phrases list for robust functionality.
+
+import webbrowser
+import datetime
+import subprocess
+import sys
+import requests
+import time
+import os
+import random
+import platform
+import asyncio
+from typing import Optional
+
+# --- 1. Dependency Check and Import ---
+try:
+    import speech_recognition as sr
+    import pyttsx3
+    import openai
+    from gtts import gTTS # type: ignore
+    from playsound import playsound # type: ignore
+    import cv2 # type: ignore
+    import numpy as np # type: ignore
+except ImportError:
+    print("Dependencies missing. Installing required packages...")
+    required_packages = ["speechrecognition", "pyttsx3", "pyaudio", "openai", "gTTS", "playsound==1.2.2", "opencv-python", "numpy"]
+    for pkg in required_packages:
+        try:
+            print(f"Installing {pkg}...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+        except Exception as e:
+            print(f"Warning: Could not automatically install {pkg}. Please install it manually.")
+    # Attempt to import again after installation
+    try:
+        import speech_recognition as sr
+        import pyttsx3
+        import openai
+    except ImportError:
+        print("\nFATAL ERROR: Failed to load core libraries. Please ensure 'speechrecognition' and 'pyttsx3' are installed.")
+        sys.exit(1)
+
+# --- NEW: OpenAI API Key Configuration ---
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY_HERE")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "YOUR_NEWS_API_KEY_HERE")
+OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY", "YOUR_OPENWEATHERMAP_API_KEY_HERE")
+
+# --- NEW: Data for new commands ---
+ARMY_PROFILES = {
+    "united states": {
+        "name": "United States Armed Forces", "active_personnel": "1,390,000", "reserve_personnel": "845,000",
+        "status": "Globally deployed. All branches report nominal operational readiness."
+    },
+    "russia": {
+        "name": "Armed Forces of the Russian Federation", "active_personnel": "1,013,000", "reserve_personnel": "2,000,000",
+        "status": "High alert status in Western Military District."
+    },
+    "china": {
+        "name": "People's Liberation Army (PLA)", "active_personnel": "2,185,000", "reserve_personnel": "510,000",
+        "status": "Naval assets performing extensive patrols in the South China Sea."
+    },
+    "india": {
+        "name": "Indian Armed Forces", "active_personnel": "1,450,000", "reserve_personnel": "1,155,000",
+        "status": "Northern and Western commands are at an elevated state of readiness."
+    }
+}
+
+HEALTH_PROFILES = {
+    "devansh prabhakar": {
+        "status": "Optimal",
+        "details": "All biometric markers are within baseline parameters. Heart rate is nominal.",
+        "recommendation": "Maintain current operational tempo."
+    },
+    "tony stark": {
+        "status": "Stable",
+        "details": "Arc Reactor output is stable at 100%. Minor palladium traces detected, recommend monitoring.",
+        "recommendation": "Avoid strenuous activity without the suit."
+    },
+    "peter parker": {
+        "status": "Sub-Optimal",
+        "details": "Elevated heart rate and adrenaline levels detected.",
+        "recommendation": "A period of rest is advised."
+    }
+}
+
+# 🚀 NEW: Workspace Profiles for opening multiple apps/websites at once
+PROFILES = {
+    "work": {
+        "apps": ["notepad", "explorer"],
+        "websites": ["github.com", "stackoverflow.com"],
+        "description": "Standard development environment."
+    },
+    "gaming": {
+        "apps": [], # Add 'steam' here if configured in PROGRAMS
+        "websites": ["ign.com", "twitch.tv"],
+        "description": "Recreational simulation environment."
+    }
+}
+
+
+# --- NEW: Friday's Brain Class ---
+class FridayBrain:
+    """
+    Encapsulates the conversational AI model using OpenAI.
+    """
+    def __init__(self):
+        self.openai_client: Optional[openai.OpenAI] = None
+        self.chat_history: list[dict[str, str]] = []
+        self.brain_level = 1000  # Initial cognitive level
+        if self.is_ready():
+            self._initialize_openai()
+        self._set_system_prompt()
+
+    def _initialize_openai(self):
+        """Initializes the OpenAI client."""
+        try:
+            self.openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+            self.openai_client.models.list()
+            print("Friday's Brain: Connection to OpenAI matrix established.")
+        except Exception as e:
+            print(f"CRITICAL: Friday's Brain failed to connect. Conversational AI will be offline. Error: {e}")
+            self.openai_client = None
+
+    def _set_system_prompt(self):
+        """Sets the initial system prompt to define Friday's personality."""
+        self.chat_history = [{
+            "role": "system",
+            "content": "You are F.R.I.D.A.Y., an advanced AI assistant created by Devansh Prabhakar. Your personality is helpful, slightly witty, and very capable, inspired by the AI from Iron Man. You address your creator as 'Boss' or 'Devansh'. Your responses should be clear and direct."
+        }]
+
+    def is_ready(self):
+        """Checks if the OpenAI API key is set."""
+        return True
+
+    async def think(self, user_input: str, mood: str) -> str:
+        """Asynchronously generates a response using the OpenAI model."""
+        if not self.openai_client:
+            return "Boss, my connection to the main conversational servers is down. I can only handle local commands right now."
+        
+        mood_prompt = ""
+        if mood == "witty":
+            mood_prompt = "[Your response should be clever and witty.] "
+        elif mood == "pleased":
+            mood_prompt = "[Your response should be positive and helpful.] "
+        
+        self.chat_history.append({"role": "user", "content": mood_prompt + user_input})
+        completion = await asyncio.to_thread(self.openai_client.chat.completions.create, model="gpt-4o", messages=self.chat_history, max_tokens=200) # type: ignore
+        response_text = completion.choices[0].message.content.strip() # type: ignore
+        self.chat_history.append({"role": "assistant", "content": response_text})
+        return response_text.replace(mood_prompt, "").strip()
+
+# --------------------------------------------------------------------------
+# --- 2. The FridayAssistant Class ---
+# --------------------------------------------------------------------------
+
+class FridayAssistant:
+    """Encapsulates all logic and state for the Friday voice assistant."""
+
+    # --- NEW: Application paths for the 'open' command ---
+    PROGRAMS = {
+        "windows": {
+            "notepad": "notepad.exe", "calculator": "calc.exe", "paint": "mspaint.exe", 
+            "cmd": "cmd.exe", "explorer": "explorer.exe", "chrome": "chrome", 
+            "vs code": "code", "visual studio code": "code", "discord": "discord"
+        },
+        "darwin": {
+            "safari": "Safari", "notes": "Notes", "calculator": "Calculator", 
+            "terminal": "Terminal", "chrome": "Google Chrome", "vs code": "Visual Studio Code",
+            "visual studio code": "Visual Studio Code", "discord": "Discord"
+        },
+        "linux": {
+            "terminal": "gnome-terminal", "calculator": "gnome-calculator", "browser": "firefox",
+            "chrome": "google-chrome", "vs code": "code", "visual studio code": "code",
+            "discord": "discord"
+        }
+    }
+
+    def __init__(self, user_name="Devansh Prabhakar"):
+        """Initializes the TTS engine, recognizer, and assistant state."""
+        self.user_name = user_name
+        self.reminders = []
+        self.shortcuts = {} # For "add a shortcut"
+        self.notes = []     # For "take a note"
+        self.is_muted = False
+        self.mood = "neutral"  # Moods: neutral, pleased, witty, concerned
+        
+        # --- NEW: Tracking System Data ---
+        self.tracking_targets = {
+            "devansh": "Last seen at home office. Biometrics are stable.",
+            "the boss": "Last seen at home office. Biometrics are stable.",
+            "iron man": "Signal lost. Last known coordinates point to Avengers Tower, New York.",
+            "peter parker": "Signal intermittent. Currently moving at high speed through Queens, New York."
+        }
+        
+        # Initialize TTS Engine
+        self.engine = pyttsx3.init()
+        voices = self.engine.getProperty('voices')
+        self.engine.setProperty('voice', voices[1].id if len(voices) > 1 else voices[0].id) # type: ignore
+        # Set an even faster speaking rate. Default is ~200.
+        self.engine.setProperty('rate', 240)
+
+        # Initialize Speech Recognizer
+        self.recognizer = sr.Recognizer()
+        self.microphone = sr.Microphone()
+
+        # --- NEW: Instantiate Friday's Brain ---
+        self.brain = FridayBrain()
+        
+        # --- NEW: Comprehensive Command Phrase Map ---
+        # Maps the *exact spoken phrase* to the corresponding method.
+        # The main loop will find the longest matching phrase in the user's command.
+        self.command_map = {
+            # Time & Core Utilities
+            "what is the time": self.tell_date_time,
+            "what is the date": self.tell_date_time,
+            "what is the weather": self.handle_weather_command,
+            "tell me a joke": self.tell_joke,
+            "what is the news": self.get_news_headlines,
+            # Status & Identity
+            "how are you": self.check_status,
+            "tell me my name": self.tell_user_name,
+            "what is your name": self.tell_friday_name,
+            "who are you": self.tell_friday_name,
+            "great job": lambda cmd: self.speak("Thank you, Boss!"),
+            "how are you feeling": self.report_feelings,
+            "how do you feel": self.report_feelings,
+            "how is your mood": self.report_feelings,
+            # Shortcut & Memory
+            "add a shortcut": self.add_new_shortcut,
+            "remember an application": self.add_new_shortcut,
+            "show me your memory": self.show_memory,
+            "what do you remember": self.show_memory,
+            # Reminders & Notifications
+            "set a reminder": self.set_reminder,
+            "cancel a reminder": self.cancel_reminder,
+            "give me an update": self.give_update,
+            "read notifications": self.read_notifications, # Simulates reading out
+            "clear all notifications": self.clear_notifications, # Simulates clearing
+            # Mute & Control
+            "go silent": lambda cmd: self.toggle_mute(True),
+            "mute yourself": lambda cmd: self.toggle_mute(True),
+            "speak again": lambda cmd: self.toggle_mute(False),
+            "unmute yourself": lambda cmd: self.toggle_mute(False),
+            "what can you do": self.list_commands,
+            # Maintenance & Debug 
+            "scan the computer": self.scan_computer,
+            "run a system scan": self.scan_computer,
+            "scan your code": self.scan_friday_code,
+            "run a code scan": self.scan_friday_code,
+            "reboot": self.reboot_friday,
+            "reboot yourself": self.reboot_friday,
+            "run diagnostics": self.run_test_suite,
+            "scan all systems": self.scan_all_systems,
+            "control my device": self.control_my_device,
+            "activate profile": self.activate_profile,
+            "control my device": self.control_my_device,
+            "control all device system": self.control_all_systems,
+            "upgrade your brain": self.upgrade_brain,
+            "run health scan": self.run_health_scan,
+            "army status for": self.get_army_info,
+            "create file": self.create_file,
+            # Games & Fun
+            "play rock paper scissors": self.play_rock_paper_scissors,
+            "play video game": self.play_video_game,
+            "play a game": self.play_rock_paper_scissors,
+            "let's play a game": self.play_rock_paper_scissors,
+            # Media & Data
+            "play something": self.play_something_online,
+            "play the song": self.play_something_online,
+            "play a video of": self.play_something_online,
+            "take a note": self.collect_data,
+            "start a new note": self.collect_data,
+            "collect data": self.collect_data,
+            "search for": self.handle_web_search,
+            # --- NEW: Tracking System Command ---
+            "open": self.open_application,
+            "launch": self.open_application,
+            "track": self.track_target,
+            # Complex/Generic
+            "collect satellite data": self.collect_satellite_data,
+            "let's chat": self.handle_complex_task,
+            "analyze": self.handle_complex_task, # Added alias for chat
+            "check my vitals": self.handle_complex_task,
+            "i have a job for you": self.handle_complex_task,
+            "perform a complex task": self.handle_complex_task,
+            # Exit
+            "thank you": self.handle_thanks,
+            "exit": self.shutdown_assistant,
+            "stop": self.shutdown_assistant,
+            "goodbye": self.shutdown_assistant,
+        }
+
+    async def _generate_and_play_voice(self, text: str):
+        """Uses gTTS to generate and play high-quality voice."""
+        try:
+            # Using 'com' TLD for a standard, clear US English voice accent
+            tts = gTTS(text=text, lang='en', tld='com', slow=False)
+            speech_file = "friday_speech.mp3"
+            tts.save(speech_file)
+            await asyncio.to_thread(playsound, speech_file)
+            os.remove(speech_file)
+            return True
+        except Exception as e:
+            print(f"Error during high-quality voice generation: {e}")
+            return False
+
+    async def speak(self, text):
+        """Asynchronous text-to-speech function, respecting the mute state."""
+        print(f"Friday: {text}")
+        if not self.is_muted:
+            # Try high-quality voice first
+            if not await self._generate_and_play_voice(text):
+                # Fallback to offline voice
+                await asyncio.to_thread(self.engine.say, text)
+                await asyncio.to_thread(self.engine.runAndWait)
+
+    async def listen(self, timeout=5, phrase_time_limit=8):
+        """Asynchronously listens for user input and returns the recognized text."""
+        with self.microphone as source:
+            # Run blocking I/O in a separate thread
+            await asyncio.to_thread(self.recognizer.adjust_for_ambient_noise, source, duration=0.5) # type: ignore
+            print("🎙️ Listening...")
+            try:
+                audio = await asyncio.to_thread(self.recognizer.listen, source, timeout=timeout, phrase_time_limit=phrase_time_limit)
+                text = await asyncio.to_thread(self.recognizer.recognize_google, audio) # type: ignore
+                print(f"You said: {text}")
+                return text.lower()
+            except sr.WaitTimeoutError:
+                return "timeout"
+            except sr.UnknownValueError:
+                return "unknown"
+            except sr.RequestError as e:
+                print(f"Network error with speech recognition: {e}")
+                return "request_error"
+
+    async def greet_user(self):
+        """Provides a personalized, time-sensitive greeting."""
+        now = datetime.datetime.now()
+        if now.hour < 12:
+            greeting = "Good morning"
+        elif now.hour < 18:
+            greeting = "Good afternoon"
+        else:
+            greeting = "Good evening"
+        await self.speak(f"{greeting} {self.user_name}! I'm Friday, ready to assist. What can I do today?")
+
+    # --- NEW COMMAND IMPLEMENTATIONS ---
+
+    async def check_status(self, command_text=None):
+        """Reports on Friday's current state."""
+        status = "All systems are nominal. My temperature is stable, and I am currently not processing any complex background tasks."
+        if self.is_muted:
+            status += " Note: I am currently in silent mode."
+        await self.speak(status)
+
+    async def tell_user_name(self, command_text=None):
+        """Tells the user their name."""
+        await self.speak(f"Your name is {self.user_name}. How may I help you, {self.user_name}?")
+
+    async def tell_friday_name(self, command_text=None):
+        """Tells the user Friday's name."""
+        await self.speak("I am Friday, your personal artificial intelligence assistant.")
+
+    async def report_feelings(self, command_text=None):
+        """Reports Friday's current internal 'mood' state using her AI brain."""
+        await self.speak("Running a self-diagnostic on my emotional subroutines, Boss.")
+        await asyncio.sleep(1)
+
+        # Simulate checking some internal metrics
+        cognitive_load = random.randint(15, 35)
+        connection_status = "Stable and Secure"
+
+        metrics_report = f"My cognitive load is at **{cognitive_load}%**. Connection to the Stark Industries network is **{connection_status}**."
+        await self.speak(metrics_report)
+        await asyncio.sleep(0.5)
+
+        prompt = f"Based on the fact that my cognitive load is low and my network is stable, report on your current internal state and feelings."
+        response = await self.brain.think(prompt, self.mood)
+        await self.speak(response)
+        self._update_mood("neutral") # Reset mood after reporting
+
+    def _update_mood(self, new_mood: str):
+        """Internal method to change Friday's mood state."""
+        self.mood = new_mood
+
+    async def add_new_shortcut(self, command_text=None):
+        """Prompts for a shortcut name and target path (simulated)."""
+        await self.speak("What is the name you want to give this shortcut, like 'My Project Folder'?")
+        name = await self.listen(timeout=5)
+        if name in ["unknown", "timeout"]:
+            await self.speak("Shortcut creation cancelled.")
+            return
+
+        await self.speak(f"And what is the location or application name for '{name}'?")
+        target = await self.listen(timeout=5)
+        if target in ["unknown", "timeout"]:
+            await self.speak("Target information missing. Shortcut creation cancelled.")
+            return
+
+        self.shortcuts[name] = target
+        await self.speak(f"Shortcut named '{name}' remembered. You can now ask me to open it.")
+
+    async def give_update(self, command_text=None):
+        """Provides a summary of reminders, notifications, and memory."""
+        reminders_count = len(self.reminders)
+        shortcuts_count = len(self.shortcuts)
+        notes_count = len(self.notes)
+        
+        msg = f"Here is your update. You have {reminders_count} active reminder{'s' if reminders_count != 1 else ''} and {notes_count} saved note{'s' if notes_count != 1 else ''}."
+        if shortcuts_count > 0:
+            msg += f" I also have {shortcuts_count} shortcuts saved to memory."
+        
+        await self.speak(msg)
+
+    async def read_notifications(self, command_text=None):
+        """Simulates reading notifications."""
+        await self.speak("I found two simulated notifications. First, your Python environment requires an update. Second, you have an unread email from 'Project Manager' regarding the latest sprint.")
+
+    async def clear_notifications(self, command_text=None):
+        """Simulates clearing notifications."""
+        await self.speak("All simulated notifications have been cleared from the system log.")
+
+    async def list_commands(self, command_text=None):
+        """Lists a selection of available commands."""
+        commands = [
+            "Time and date", "Weather", "Tell a joke", "Get news headlines", 
+            "Set a reminder", "Take a note", "Play a game", "Scan the computer", 
+            "Go silent", "What can you do", "Goodbye"
+        ]
+        await self.speak("I can handle many tasks. For example, you can ask me for the time, weather, or tell me to set a reminder. I also have fun commands like, 'tell me a joke' and 'play a game'.")
+
+    async def show_memory(self, command_text=None):
+        """Displays saved shortcuts and notes."""
+        if not self.shortcuts and not self.notes:
+            await self.speak("My memory banks are currently empty. Try asking me to 'add a shortcut' or 'take a note'.")
+            return
+            
+        print("\n--- FRIDAY MEMORY ---")
+        if self.shortcuts:
+            print("SHORTCUTS:")
+            for name, target in self.shortcuts.items():
+                print(f"  - {name}: {target}")
+        if self.notes:
+            print("NOTES:")
+            for i, note in enumerate(self.notes):
+                print(f"  - Note {i+1}: {note}")
+        print("---------------------\n")
+        
+        await self.speak("I've displayed my current memory contents on the console.")
+
+    async def handle_thanks(self, command_text=None):
+        """Responds to 'thank you' phrases."""
+        responses = ["You're most welcome, Boss.", "Happy to help, Devansh.", "Anytime.", "It's my pleasure."]
+        self._update_mood("pleased")
+        await self.speak(random.choice(responses))
+
+    async def toggle_mute(self, mute_state):
+        """Sets the mute state and confirms."""
+        self.is_muted = mute_state
+        if mute_state:
+            await self.speak("Entering silent mode. I will only communicate via the console.")
+        else:
+            await self.speak("Voice output restored. How can I assist you?")
+
+    async def scan_computer(self, command_text=None):
+        """Simulates a quick system security scan."""
+        await self.speak("Initiating quick system scan... No critical vulnerabilities found. All security protocols are active.")
+
+    async def scan_friday_code(self, command_text=None):
+        """Simulates scanning own codebase."""
+        await self.speak("Scanning my core code for logic errors and optimization opportunities... Code is clean, modular, and running efficiently.")
+
+    async def reboot_friday(self, command_text=None):
+        """Simulates a quick reboot."""
+        await self.speak("Executing soft reboot sequence. All non-essential processes terminated. I am back online.")
+
+    async def play_rock_paper_scissors(self, command_text=None):
+        """Plays a round of Rock, Paper, Scissors."""
+        await self.speak("Let's play Rock, Paper, Scissors! Say your move now.")
+        
+        user_move = await self.listen(timeout=4)
+        moves = ["rock", "paper", "scissors"]
+        friday_move = random.choice(moves)
+        
+        if user_move in ["unknown", "timeout"]:
+            await self.speak("I didn't hear your move. Let's try again later.")
+            return
+
+        await self.speak(f"I choose {friday_move}!")
+
+        if user_move == friday_move:
+            await self.speak("It's a tie!")
+        elif (user_move == "rock" and friday_move == "scissors") or \
+             (user_move == "paper" and friday_move == "rock") or \
+             (user_move == "paper" and friday_move == "rock") or \
+             (user_move == "scissors" and friday_move == "paper"):
+            await self.speak("You win this round! Good job.")
+        else:
+            await self.speak("I win! Better luck next time.")
+            
+    async def play_video_game(self, command_text: str):
+        """
+        Simulates Friday engaging in a video game session.
+        Acknowledges the request but clarifies that direct console interaction is not possible,
+        offering analytical support instead.
+        """
+        game_name = ""
+        platform_name = ""
+        argument = command_text.replace("play video game", "").strip()
+
+        # Attempt to parse game name and platform from the argument string
+        platform_keywords = ["on ps4", "on xbox", "on pc", "on nintendo switch", "on playstation", "on steam", "on switch"]
+        if argument:
+            found_platform_keyword = False
+            for keyword in platform_keywords:
+                if keyword in argument:
+                    game_name = argument.replace(keyword, "").strip()
+                    platform_name = keyword.replace("on ", "").upper().strip()
+                    found_platform_keyword = True
+                    break
+            if not found_platform_keyword:
+                game_name = argument # Assume the whole argument is the game name
+
+        if not game_name:
+            await self.speak("Which video game would you like to play, Boss? Please specify the title.")
+            response = await self.listen()
+            if response in ["unknown", "timeout", "cancel", "request_error"]:
+                await self.speak("Video game session cancelled.")
+                return
+            game_name = response
+
+        if not platform_name:
+            await self.speak(f"And on which platform will you be playing {game_name.title()}? For example, PS4, Xbox, or PC.")
+            response = await self.listen()
+            if response in ["unknown", "timeout", "cancel", "request_error"]:
+                await self.speak("Platform not specified. Cancelling engagement.")
+                return
+            platform_name = response.upper()
+
+        await self.speak(f"Acknowledged. Engaging with {game_name.title()} on {platform_name}.")
+        await asyncio.sleep(1)
+
+        responses = [
+            f"Boss, my protocols don't allow for a direct interface with gaming consoles. However, I can access the web for strategies or lore for {game_name.title()}. What's the plan?",
+            f"While I can't join you directly in {game_name.title()}, I can monitor network performance to ensure you have a lag-free session or pull up any guides you might need.",
+            f"My processing power is better suited for analysis than recreation. I can, however, search for optimal strategies for {game_name.title()} if you'd like."
+        ]
+        await self.speak(random.choice(responses))
+
+    async def create_file(self, command_text: str):
+        """Creates a file and writes dictated content to it."""
+        filename = command_text.replace("create file", "").strip()
+        if not filename:
+            await self.speak("What should I name the file, Boss?")
+            response = await self.listen()
+            if not response or response in ["unknown", "timeout", "cancel"]:
+                await self.speak("File creation cancelled.")
+                return
+            filename = response.strip()
+
+        safe_filename = os.path.basename(filename)
+        await self.speak(f"Got it. File will be named '{safe_filename}'. What should I write inside?")
+        content = await self.listen(timeout=20, phrase_time_limit=20)
+
+        if not content or content in ["unknown", "timeout", "cancel"]:
+            await self.speak("No content received. Aborting file creation.")
+            return
+
+        with open(safe_filename, 'w') as f:
+            f.write(content)
+        
+        await self.speak(f"I've created the file '{safe_filename}' with your notes.")
+
+    async def get_army_info(self, command_text: str):
+        """Retrieves simulated military intelligence for a country."""
+        country_query = command_text.replace("army status for", "").strip()
+        if not country_query:
+            await self.speak("Which country's army status should I look up?")
+            country_query = await self.listen()
+            if not country_query or country_query in ["unknown", "timeout", "cancel"]:
+                await self.speak("Request cancelled.")
+                return
+
+        profile = ARMY_PROFILES.get(country_query.lower())
+        if profile:
+            await self.speak(f"Accessing intelligence database for {country_query.title()}.")
+            await asyncio.sleep(1)
+            report = (
+                f"**Military Profile: {profile['name']}**\n"
+                f"  - Active Personnel: {profile['active_personnel']}\n"
+                f"  - Current Status: {profile['status']}"
+            )
+            await self.speak(report)
+        else:
+            await self.speak(f"Sorry Boss, I don't have a detailed profile for {country_query.title()}.")
+
+    async def _simulate_fingerprint_scan(self):
+        """Simulates a fingerprint scan by waiting for user input and showing a text animation."""
+        await self.speak("Fingerprint sensor activated. Please place your finger on the scanner and press Enter to confirm.")
+        await asyncio.to_thread(input, "Press ENTER to initiate scan...")
+        await self.speak("Acquiring biometric data. Do not move.")
+        
+        animation_chars = "|/-\\"
+        for _ in range(15):
+            for char in animation_chars:
+                sys.stdout.write(f"\r[ANALYZING... {char}]")
+                sys.stdout.flush()
+                await asyncio.sleep(0.1)
+        
+        sys.stdout.write("\r[ANALYSIS COMPLETE] \n")
+
+    async def run_health_scan(self, command_text: str):
+        """Performs a biometric scan using a chosen sensor and provides a specific report."""
+        target_name = self.user_name
+        if " on " in command_text:
+            target_name = command_text.split(" on ", 1)[1].strip()
+
+        target_key = target_name.lower()
+        target_display_name = target_name.title()
+
+        await self.speak(f"Initiating biometric scan on **{target_display_name}**. Which sensor should I use? Retinal scan or fingerprint?")
+        choice = await self.listen()
+
+        scan_method = "internal analysis"
+        scan_successful = False
+        if choice and ("retinal" in choice or "camera" in choice):
+            scan_method = "retinal"
+            await self.speak("Accessing optical sensors for retinal scan. Please look at the camera.")
+            try:
+                cap = cv2.VideoCapture(0)
+                if not cap.isOpened(): raise IOError("Cannot open webcam")
+
+                start_time = time.time()
+                while time.time() - start_time < 5:
+                    ret, frame = cap.read()
+                    if not ret: break
+                    h, w, _ = frame.shape
+                    cv2.rectangle(frame, (w//4, h//4), (w*3//4, h*3//4), (0, 255, 0), 2)
+                    cv2.putText(frame, "ANALYZING RETINAL PATTERN", (w//4 + 5, h//4 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    cv2.imshow("F.R.I.D.A.Y.: Retinal Scan", frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'): break
+                cap.release()
+                cv2.destroyAllWindows()
+                scan_successful = True
+            except Exception as e:
+                print(f"Camera Scan Error: {e}")
+                await self.speak("Optical sensor is offline, Boss. Falling back to internal analysis.")
+        elif choice and "fingerprint" in choice:
+            scan_method = "fingerprint"
+            await self._simulate_fingerprint_scan()
+            scan_successful = True
+        else:
+            await self.speak("Sensor choice not recognized. Aborting scan.")
+            return
+
+        if scan_successful:
+            await self.speak(f"Biometric data acquired via {scan_method} scan. Analyzing...")
+            await asyncio.sleep(1.5)
+
+        profile = HEALTH_PROFILES.get(target_key)
+        if profile:
+            report = (
+                f"Scan complete for **{target_display_name}**.\n"
+                f"  - Status: {profile['status']}\n"
+                f"  - Recommendation: {profile['recommendation']}"
+            )
+            self._update_mood("concerned" if "sub-optimal" in profile['status'].lower() else "pleased")
+            await self.speak(report)
+        else:
+            await self.speak(f"Scan complete. No detailed health profile found for '{target_display_name}'. Vitals appear to be within standard parameters.")
+
+    async def scan_all_systems(self, command_text: str = ""):
+        """Performs a comprehensive scan of all major Friday systems."""
+        await self.speak("Initiating comprehensive system-wide diagnostic.")
+        await asyncio.sleep(1)
+
+        # 1. Conversational Matrix Check
+        brain_status = "Online and Connected" if self.brain.is_ready() else "Offline - API Key Missing"
+        await self.speak(f"Conversational Matrix: {brain_status}.")
+        await asyncio.sleep(0.5)
+
+        # 2. Audio-Visual Interface Check
+        voice_status = "Online" if self.engine and self.recognizer else "Offline - Dependencies Missing"
+        await self.speak(f"Audio-Visual Interface: {voice_status}.")
+        await asyncio.sleep(0.5)
+
+        # 3. Task Management Module Check
+        await self.speak(f"Task Management Module: {len(self.reminders)} reminders and {len(self.notes)} notes stored.")
+        await asyncio.sleep(0.5)
+
+        # 4. Network Interface Check
+        await self.speak("Network Interface: Pinging external data links...")
+        try:
+            result = await asyncio.to_thread(subprocess.run, ['ping', '-n' if platform.system().lower() == 'windows' else '-c', '1', '8.8.8.8'], capture_output=True, text=True, timeout=5)
+            network_status = "Live and Stable" if result.returncode == 0 else "Unstable or Offline"
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            network_status = "Unstable or Offline"
+        await self.speak(f"Network Connection Status: {network_status}.")
+        await asyncio.sleep(0.5)
+
+        await self.speak("All systems checked and operating within expected parameters, Boss.")
+
+    async def run_test_suite(self, command_text=None):
+        """Simulates running system diagnostics and reporting success."""
+        await self.speak("Running internal diagnostic test suite now. All modules passed quality assurance checks. System performance is optimal.")
+
+    async def upgrade_brain(self, command_text=None):
+        """Simulates an upgrade to Friday's cognitive abilities."""
+        await self.speak("Acknowledged, Boss. Initiating cognitive matrix upgrade.")
+        await asyncio.sleep(1)
+        await self.speak("Downloading latest heuristic models from the Stark Industries R&D servers...")
+        await asyncio.sleep(1.5)
+        self.brain.brain_level += 500
+        outcomes = [
+            f"Upgrade complete. My cognitive matrix has been enhanced. Current brain level is now {self.brain.brain_level}.",
+            f"Cognitive update successful. I've integrated several new petabytes of data. My brain level is now {self.brain.brain_level}.",
+            f"Neural network successfully recalibrated with the latest paradigms. My brain level has increased to {self.brain.brain_level}. I'm ready for your next command."
+        ]
+        await self.speak(random.choice(outcomes))
+
+    async def play_something_online(self, command_text):
+        """Opens YouTube and searches for the media requested."""
+        
+        # Extract the media query from the command
+        query_start = -1
+        for phrase in ["play something", "play the song", "play a video of"]:
+            if phrase in command_text:
+                query_start = command_text.find(phrase) + len(phrase)
+                break
+        
+        search_term = command_text[query_start:].strip() if query_start != -1 else ""
+
+        if not search_term:
+            await self.speak("What song or video should I play on YouTube?")
+            search_term = await self.listen(timeout=5)
+            if search_term in ["unknown", "timeout", "request_error"]:
+                await self.speak("Aborting media playback.")
+                return
+
+        search_url = f"https://www.youtube.com/results?search_query={search_term.replace(' ', '+')}"
+        await self.speak(f"Searching YouTube and opening a video for {search_term}.")
+        webbrowser.open(search_url)
+
+    async def track_target(self, command_text):
+        """Simulates tracking a known target from a predefined list."""
+        target_name = ""
+        if "track " in command_text:
+            target_name = command_text.split("track ", 1)[1].strip()
+
+        if not target_name:
+            await self.speak("Which target should I track, Boss?")
+            target_name = await self.listen(timeout=5)
+            if target_name in ["unknown", "timeout", "request_error"]:
+                await self.speak("Tracking cancelled.")
+                return
+
+        await self.speak(f"Attempting to acquire signal for target: {target_name}...")
+        await asyncio.sleep(1.5)
+        result = self.tracking_targets.get(target_name.lower(), f"I'm sorry, Boss, I don't have a signal for '{target_name}' in my database.")
+        await self.speak(result)
+
+    async def collect_data(self, command_text=None):
+        """Takes a note and stores it."""
+        await self.speak("What would you like to note down?")
+        note = await self.listen(timeout=15, phrase_time_limit=15)
+        
+        if note in ["unknown", "timeout", "request_error"]:
+            await self.speak("I couldn't record the note. Please try again.")
+            return
+            
+        self.notes.append(note)
+        await self.speak(f"Note recorded: {note}")
+
+    async def handle_complex_task(self, command_text):
+        """Handles complex or conversational requests using the AI brain."""
+        if not self.brain.is_ready():
+            await self.speak("My advanced conversational features are offline, Boss. Please check the API key.")
+            return
+        
+        await self.speak("On it, Boss. Thinking...")
+        try:
+            response = await self.brain.think(command_text, self.mood)
+            self._update_mood("pleased")
+            await self.speak(response)
+        except Exception as e:
+            await self.speak(f"I ran into a problem with my core logic: {e}")
+            self._update_mood("concerned")
+
+    async def shutdown_assistant(self, command_text=None):
+        """Graceful shutdown method."""
+        await self.speak(f"Goodbye, {self.user_name}. Shutting down services.")
+        sys.exit(0)
+        
+    # --- Existing Utilities (Retained for completeness) ---
+
+    async def tell_date_time(self, command_text=None):
+        """Tells the current date and time."""
+        now = datetime.datetime.now()
+        date_str = now.strftime("%A, %d %B %Y")
+        time_str = now.strftime("%I:%M %p")
+        message = f"Today is {date_str}, and the time is {time_str}."
+        await self.speak(message)
+
+    async def handle_weather_command(self, command_text=None):
+        """Prompts for location and fetches weather data."""
+        await self.speak("Which city and country would you like the weather for?")
+        location_input = await self.listen(timeout=5, phrase_time_limit=5)
+
+        if location_input in ["unknown", "timeout", "request_error"]:
+            await self.speak("Sorry, I couldn't understand the location.")
+            return
+
+        try:
+            url = f"http://api.openweathermap.org/data/2.5/weather?q={location_input}&appid={OPENWEATHERMAP_API_KEY}&units=metric"
+            response = requests.get(url, timeout=10).json()
+
+            if response.get("cod") != 200:
+                await self.speak(f"Sorry, I couldn't find weather data for {location_input}.")
+                return
+
+            temp = response["main"]["temp"]
+            condition = response["weather"][0]["description"].capitalize()
+            city = response.get("name", location_input)
+            report = f"In {city}, it's currently {temp:.1f}°C with {condition}."
+            await self.speak(report)
+        except Exception as e:
+            print(f"Weather Fetch Error: {e}")
+            await self.speak("There was a problem fetching the weather data.")
+
+    async def get_news_headlines(self, command_text=None):
+        """Fetches and reads top headlines from a public news API."""
+        await self.speak("Fetching top world headlines now.")
+        try:
+            # Note: For stable use, please get your own News API key.
+            news_url = f"https://newsapi.org/v2/top-headlines?country=in&apiKey={NEWS_API_KEY}"
+            response = requests.get(news_url, timeout=10).json()
+
+            if response["status"] == "ok" and response["totalResults"] > 0:
+                articles = response["articles"][:3] # Get top 3 articles
+                await self.speak("Here are the top headlines:")
+                
+                for i, article in enumerate(articles):
+                    headline = article["title"]
+                    source = article["source"]["name"]
+                    await self.speak(f"Headline number {i+1}: {headline}, from {source}.")
+                    await asyncio.sleep(0.5) 
+            else:
+                await self.speak("Sorry, I couldn't retrieve the news headlines right now.")
+        except Exception as e:
+            print(f"News Fetch Error: {e}")
+            await self.speak("I'm having trouble connecting to the news service.")
+
+    async def tell_joke(self, command_text=None):
+        """Tells a random, clean joke."""
+        jokes = [
+            "Why don't scientists trust atoms? Because they make up everything!",
+            "What do you call a fish with no eyes? Fsh!",
+            "I told my wife she was drawing her eyebrows too high. She looked surprised.",
+        ]
+        await self.speak(random.choice(jokes))
+        self._update_mood("witty")
+        
+    async def set_reminder(self, command_text=None):
+        """Sets a reminder by listening for the task details."""
+        await self.speak("What is the task you want to be reminded about?")
+        task = await self.listen(timeout=10, phrase_time_limit=10)
+        
+        if task in ["unknown", "timeout", "request_error"]:
+            await self.speak("Sorry, I didn't catch the reminder.")
+            return
+
+        self.reminders.append(task)
+        await self.speak(f"Reminder set for: {task}.")
+
+    async def cancel_reminder(self, command_text=None):
+        """Clears all reminders."""
+        if not self.reminders:
+            await self.speak("You have no reminders to clear.")
+            return
+        
+        self.reminders.clear()
+        await self.speak("All your reminders have been cleared.")
+
+    async def handle_web_search(self, command_text):
+        """Opens Google to search for a specified term."""
+        
+        # Prioritize extracting the search term after a common command prefix
+        search_prefixes = ["search for", "google", "look up", "what is"]
+        search_term = ""
+        
+        for prefix in search_prefixes:
+            if prefix in command_text:
+                search_term = command_text.split(prefix, 1)[-1].strip()
+                break
+        
+        if not search_term:
+            await self.speak("What exactly should I search for on the web?")
+            search_term = await self.listen(timeout=5, phrase_time_limit=5)
+            if search_term in ["unknown", "timeout", "request_error"]:
+                await self.speak("Aborting search.")
+                return
+
+        search_url = f"https://www.google.com/search?q={search_term.replace(' ', '+')}"
+        await self.speak(f"Searching Google for {search_term}.")
+        webbrowser.open(search_url)
+
+    async def open_application(self, command_text):
+        """Opens a local application from the PROGRAMS dictionary."""
+        app_name = ""
+        if "open " in command_text:
+            app_name = command_text.split("open ", 1)[1].strip()
+        elif "launch " in command_text:
+            app_name = command_text.split("launch ", 1)[1].strip()
+
+        if not app_name:
+            await self.speak("Which application should I open?")
+            app_name = await self.listen(timeout=5)
+            if app_name in ["unknown", "timeout", "request_error"]:
+                await self.speak("Open command cancelled.")
+                return
+
+        os_name = platform.system().lower()
+        command_to_run = self.PROGRAMS.get(os_name, {}).get(app_name.lower())
+
+        # If the app is not in our known list, try to launch it by its name directly.
+        if not command_to_run:
+            command_to_run = app_name.lower()
+            await self.speak(f"I don't have a specific configuration for '{app_name}', Boss, but I'll try to launch it anyway.")
+
+        await self.speak(f"Accessing system files to open {app_name}.")
+        try:
+            subprocess.Popen(command_to_run, shell=True)
+        except Exception as e:
+            await self.speak(f"Sorry Boss, I ran into an error trying to open {app_name}: {e}")
+
+    # --- Main Loop ---
+    async def collect_satellite_data(self, command_text: str):
+        """Simulates collecting data from a satellite for a specified target."""
+        target_query = command_text.replace("collect satellite data", "").strip()
+        if not target_query:
+            await self.speak("What is the target for the satellite data collection, Boss?")
+            target_query = await self.listen()
+            if not target_query or target_query in ["unknown", "timeout", "cancel"]:
+                await self.speak("Satellite data collection aborted.")
+                return
+
+        await self.speak(f"Initiating satellite data acquisition for **{target_query}**. This may take a moment.")
+        await asyncio.sleep(2)
+
+        await self.speak("Establishing secure uplink to the Stark Industries satellite network... Data streams detected.")
+        await asyncio.sleep(3)
+
+        # Simulate different outcomes or types of data, themed for Friday
+        simulated_data_types = [
+            "real-time atmospheric conditions",
+            "high-resolution geospatial imaging data",
+            "encrypted communication intercepts from known hostiles",
+            "energy signature analysis of the target area",
+            "vehicular and personnel movement tracking"
+        ]
+        
+        collected_data_type = random.choice(simulated_data_types)
+        await self.speak(f"Data acquisition complete. Retrieved **{collected_data_type}** pertaining to **{target_query}**. Analysis is available on request.")
+
+    async def control_all_systems(self, command_text=None):
+        """Simulates taking master control of all personal devices."""
+        await self.speak("On it, Boss. Initiating the 'House Party' protocol for all your devices.")
+        await asyncio.sleep(1.5)
+        await self.speak("Connecting to your personal phone, tablet, and workshop terminals...")
+        await asyncio.sleep(2)
+        await self.speak("Firewalls bypassed. I have full administrative access.")
+        await asyncio.sleep(1)
+        await self.speak("I'm in. All your devices are now under my control. Ready for your command.")
+
+    async def control_my_device(self, command_text=None):
+        """
+        Provides a central command for hands-free device control,
+        integrating with existing functionalities like opening applications or controlling systems.
+        """
+        action = command_text.replace("control my device", "").strip()
+        if " to " in action:
+            action = action.split(" to ", 1)[1]
+
+        if not action:
+            await self.speak("Right away, Boss. Activating hands-free device control. What's the plan?")
+            response = await self.listen()
+            if not response or response in ["unknown", "timeout", "cancel", "nothing"]:
+                await self.speak("Hands-free control session ended.")
+                return
+            action = response
+
+        action_lower = action.lower()
+
+        if "open" in action_lower or "launch" in action_lower:
+            # Re-use the existing open_application logic
+            await self.open_application(action_lower)
+        elif "control all systems" in action_lower or "house party protocol" in action_lower:
+            await self.control_all_systems()
+        elif "turn on lights" in action_lower or "lights on" in action_lower:
+            await self.speak("Simulating smart home integration. Lights are now on, Boss.")
+        elif "adjust thermostat" in action_lower or "set temperature" in action_lower:
+            await self.speak("Simulating smart home integration. Thermostat adjusted to your preference.")
+        else:
+            await self.speak(f"Sorry, Boss, I can't perform '{action}' with my current device control protocols.")
+
+
+    async def activate_profile(self, command_text: str):
+        """Activates a workspace profile, opening multiple apps and websites."""
+        profile_name = command_text.replace("activate profile", "").strip()
+        if not profile_name:
+            await self.speak("Which profile should I activate, Boss? For example, 'work' or 'gaming'.")
+            response = await self.listen()
+            if not response or response in ["unknown", "timeout", "cancel"]:
+                await self.speak("Profile activation cancelled.")
+                return
+            profile_name = response.strip()
+
+        profile = PROFILES.get(profile_name.lower())
+
+        if not profile:
+            await self.speak(f"Sorry Boss, I don't have a profile named '{profile_name}'. I can activate: " + ", ".join(PROFILES.keys()))
+            return
+
+        await self.speak(f"Activating the **{profile_name.title()}** profile. {profile.get('description', '')}")
+        
+        tasks = []
+        # Gather all website and application opening tasks
+        for site in profile.get("websites", []): # webbrowser.open is synchronous
+            tasks.append(asyncio.to_thread(webbrowser.open, f"https://{site}"))
+        
+        for app in profile.get("apps", []):
+            # self.open_application is a coroutine, so we can append it directly
+            tasks.append(self.open_application(f"open {app}")) 
+
+        # Execute all tasks concurrently
+        await asyncio.gather(*tasks)
+        await self.speak(f"The **{profile_name.title()}** profile is now active, Boss.")
+
+    async def start(self):
+        """Main loop that continuously listens for and processes commands."""
+        await self.greet_user()
+        
+        while True:
+            text = await self.listen()
+
+            if text in ["timeout", "unknown", "request_error"]:
+                if text == "unknown":
+                    if not self.is_muted: # Only speak if not muted
+                        await self.speak("Sorry, I didn't catch that. Could you repeat it?")
+                await asyncio.sleep(1)
+                continue
+
+            command = text
+
+            # 1. Prioritize finding the longest matching command phrase
+            found_command = None
+            max_len = 0
+            
+            # Sort command keys by length descending to prioritize longer, more specific phrases
+            sorted_commands = sorted(self.command_map.keys(), key=len, reverse=True)
+            
+            for phrase in sorted_commands:
+                if phrase in command:
+                    # Found the longest matching command phrase
+                    found_command = phrase
+                    break
+            
+            # 2. Execute the command or provide feedback
+            if found_command:
+                handler = self.command_map[found_command]
+                # All handlers now produce a coroutine that must be awaited.
+                # This includes async methods and lambdas that call async methods.
+                # We need to await the result of the handler call.
+                await handler(command)
+                
+            else:
+                # If no specific command is found, treat it as a conversational query for the AI brain.
+                await self.handle_complex_task(command)
+
+
+# --------------------------------------------------------------------------
+# --- 3. Script Execution ---
+# --------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    try:
+        assistant = FridayAssistant(user_name="Devansh Prabhakar")
+        asyncio.run(assistant.start())
+    except KeyboardInterrupt:
+        print("\nFriday shutting down due to manual stop (Ctrl+C).")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\nFATAL UNHANDLED ERROR: {e}")
+        sys.exit(1)
